@@ -7,6 +7,7 @@ import { getSessionUser, recentJobs, createJob, runJobNow, channelHealth, getQuo
 import { providerOverview } from "@/lib/providers";
 import { buildAutopsy } from "@/lib/engines";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function json(data: unknown, status = 200) {

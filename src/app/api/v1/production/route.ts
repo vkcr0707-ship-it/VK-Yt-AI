@@ -8,6 +8,7 @@ import { writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { GEN_DIR } from "@/lib/system";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function json(data: unknown, status = 200) {

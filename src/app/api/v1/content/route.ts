@@ -7,6 +7,7 @@ import { z } from "zod";
 import { hashPassword, verifyPassword, getSessionUser, createJob, runJobNow, ensureProjectForIdea, buildStoryboardAndEDL, getMemory } from "@/lib/system";
 import { buildNicheProfile, planCalendar, buildStrategy } from "@/lib/engines";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function json(data: unknown, status = 200) {
