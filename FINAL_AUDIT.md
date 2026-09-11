@@ -39,6 +39,7 @@ This audit reflects local verification only. No hosted deployment has been perfo
 | Job system (12 types + lifecycle) | ✅ | ✅ | ✅ | Retry verified in drill; Jobs tab with logs |
 | Cost control (per-video + cap + pause) | ✅ | ✅ | ✅ | Cost rows on every stage; loop pauses over cap |
 | SaaS dashboard | ✅ | ✅ | ✅ | 14 tabs; Today/health/recommendation/pipeline |
+| AI Command Center | ✅ | ✅ | ✅ | Today surface shows best opportunity, recommended action, intelligence, 20 ideas, and authenticated Generate Everything orchestration |
 | Database (30+ models) | ✅ | ✅ | ✅ | 33 tables pushed to Postgres |
 | Security (auth/sessions/server secrets) | ✅ | ✅ | ✅ | scrypt passwords, HttpOnly sessions, zod validation |
 | Provider abstraction | ✅ | ✅ | ✅ | Swap without business-logic rewrite; Settings shows status |

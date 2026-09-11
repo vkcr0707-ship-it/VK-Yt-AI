@@ -8,6 +8,7 @@
 - [x] Phase 4: System (`src/lib/system.ts`) — auth, quota, YouTube Data API, OAuth, resumable upload, analytics, FFmpeg renderer + HTML preview fallback, 12 job handlers, autonomous loop, packaging, E2E runner, failure drill
 - [x] Phase 5: APIs — content / production / ops route groups
 - [x] Phase 6: UI — 14-tab SaaS dashboard (auth, wizard, research, trends, ideas, scripts, studio, packaging, publish, analytics, strategy, jobs, tests, settings)
+- [x] Phase 6.1: AI Command Center — best opportunity, next action, channel memory/performance context, 20 ranked ideas, and Generate Everything control
 
 ## Current phase
 - Phase 7: LOCAL VERIFIED — schema, authentication, API, build, and runtime smoke tests pass

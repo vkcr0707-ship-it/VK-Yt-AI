@@ -242,8 +242,20 @@ function TodayTab({ dash, say, runBusy, busy, refresh, channelId, nicheId }: Tab
   const health = (dash.health as AnyRec) ?? {};
   const strat = dash.strategy as AnyRec | null;
   const pipe = (dash.pipeline as AnyRec) ?? {};
+  const memory = (dash.memory as AnyRec) ?? {};
+  const ideas = arr<AnyRec>(dash.ideas);
+  const topOpportunity = arr<AnyRec>(dash.opportunities)[0];
+  const nextAction = str(strat?.recommendation) || (topOpportunity ? `Generate a first draft around "${str(topOpportunity.topic)}".` : "Run Generate Everything to discover the next opportunity.");
   return (
     <div className="space-y-4">
+      <Card title="🤖 AI Command Center" right={<Btn onClick={() => runBusy("Generating everything…", async () => { const d = await api("/api/v1/content?action=run-job", { body: { type: "AUTONOMOUS", nicheId, maxVideos: 1 } }); const job = d.job as AnyRec; say(str(job?.status) === "done" ? "ok" : "err", `Command Center ${(job?.status ?? "started")}: ${JSON.stringify(job?.result ?? job?.error ?? "pipeline running").slice(0, 240)}`); await refresh(channelId); })} disabled={busy !== ""}>⚡ Generate Everything</Btn>}>
+        <div className="grid md:grid-cols-4 gap-3 text-sm">
+          <div className="bg-slate-800 rounded-lg p-3 md:col-span-2"><p className="text-xs uppercase tracking-wide text-slate-400">Recommended next action</p><p className="font-bold text-green-300 mt-1">{nextAction}</p><p className="text-slate-400 mt-2">Confidence: {strat ? num(strat.confidence).toFixed(0) : "not scored"}</p></div>
+          <div className="bg-slate-800 rounded-lg p-3"><p className="text-xs uppercase tracking-wide text-slate-400">Today&apos;s best opportunity</p><p className="font-bold mt-1">{str(topOpportunity?.topic, "No opportunity yet")}</p><p className="text-amber-300 mt-2">Score {topOpportunity ? num(topOpportunity.opportunityScore).toFixed(1) : "--"}</p></div>
+          <div className="bg-slate-800 rounded-lg p-3"><p className="text-xs uppercase tracking-wide text-slate-400">Channel intelligence</p><p className="font-bold mt-1">{num(memory.successfulTopics ? arr(memory.successfulTopics).length : 0)} learned wins</p><p className="text-slate-400 mt-2">{num(health.samples)} performance samples</p></div>
+        </div>
+        <div className="mt-3"><p className="text-xs uppercase tracking-wide text-slate-400 mb-2">AI ideas ({ideas.length})</p>{ideas.length ? <div className="grid md:grid-cols-2 gap-x-5">{ideas.slice(0, 20).map((idea, index) => <div key={str(idea.id, String(index))} className="flex justify-between gap-3 py-1.5 border-b border-slate-800"><span className="truncate">{index + 1}. {str(idea.title)}</span><Score v={num(idea.score)} /></div>)}</div> : <p className="text-slate-400">No persisted ideas yet. Generate Everything will research, score, and create them.</p>}</div>
+      </Card>
       <div className="grid md:grid-cols-3 gap-4">
         <Card title="📅 Today">
           <p className="text-sm text-slate-300">🔥 {arr(dash.trends).length} trends tracked · 💡 {arr(dash.opportunities).length} opportunities · 🎬 {arr(dash.projects).length} projects</p>

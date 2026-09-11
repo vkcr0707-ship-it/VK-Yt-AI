@@ -2,7 +2,7 @@
 // end-to-end pipeline test, failure drill.
 import { db } from "@/db";
 import * as s from "@/db/schema";
-import { eq, desc, and, gte } from "drizzle-orm";
+import { eq, desc, and, gte, inArray } from "drizzle-orm";
 import { getSessionUser, recentJobs, createJob, runJobNow, channelHealth, getQuota, runE2EPipeline, runFailureDrill, ffmpegAvailable, updateMemoryFromAutopsy } from "@/lib/system";
 import { providerOverview } from "@/lib/providers";
 import { buildAutopsy } from "@/lib/engines";
@@ -36,8 +36,11 @@ export async function GET(req: Request) {
       const opps = niche ? await db.select().from(s.opportunities).where(eq(s.opportunities.nicheId, niche.id)).orderBy(desc(s.opportunities.opportunityScore)).limit(5) : [];
       const trends = niche ? await db.select().from(s.trends).where(eq(s.trends.nicheId, niche.id)).orderBy(desc(s.trends.trendScore)).limit(5) : [];
       const projects = niche ? await db.select().from(s.videoProjects).where(eq(s.videoProjects.nicheId, niche.id)).orderBy(desc(s.videoProjects.createdAt)).limit(20) : [];
-      const ideas = niche ? await db.select().from(s.contentIdeas).where(eq(s.contentIdeas.nicheId, niche.id)).orderBy(desc(s.contentIdeas.score)).limit(5) : [];
+      const ideas = niche ? await db.select().from(s.contentIdeas).where(eq(s.contentIdeas.nicheId, niche.id)).orderBy(desc(s.contentIdeas.score)).limit(20) : [];
       const strat = niche ? (await db.select().from(s.strategies).where(eq(s.strategies.nicheId, niche.id)).orderBy(desc(s.strategies.createdAt)).limit(1))[0] ?? null : null;
+      const memory = channel ? await db.select().from(s.channelMemories).where(eq(s.channelMemories.channelId, channel.id)).limit(1) : [];
+      const projectIds = projects.map((project) => project.id);
+      const performances = projectIds.length ? await db.select().from(s.videoPerformances).where(inArray(s.videoPerformances.projectId, projectIds)).limit(10) : [];
       const cal = niche ? await db.select().from(s.contentCalendars).where(and(eq(s.contentCalendars.nicheId, niche.id), gte(s.contentCalendars.scheduledDate, new Date()))).orderBy(s.contentCalendars.scheduledDate).limit(10) : [];
       const health = await channelHealth(channel.id);
       const jobs = await recentJobs(10);
@@ -48,7 +51,7 @@ export async function GET(req: Request) {
         inQA: projects.filter((p) => p.stage === "qa" || p.status === "blocked_qa").length,
         published: projects.filter((p) => p.stage === "published").length,
       };
-      return json({ channels: chans, channel, niche, opportunities: opps, trends, projects, ideas, strategy: strat, calendar: cal, health, jobs, pipeline });
+      return json({ channels: chans, channel, niche, opportunities: opps, trends, projects, ideas, strategy: strat, memory: memory[0] ?? null, performances, calendar: cal, health, jobs, pipeline });
     }
 
     if (action === "jobs") return json({ jobs: await recentJobs(50) });
