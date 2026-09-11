@@ -3,7 +3,7 @@
 import { db } from "@/db";
 import * as s from "@/db/schema";
 import { eq, desc, and, gte, inArray } from "drizzle-orm";
-import { getSessionUser, recentJobs, createJob, runJobNow, channelHealth, getQuota, runE2EPipeline, runFailureDrill, ffmpegAvailable, updateMemoryFromAutopsy } from "@/lib/system";
+import { getSessionUser, recentJobs, createJob, runJobNow, channelHealth, getQuota, runE2EPipeline, runFailureDrill, ffmpegAvailable, updateMemoryFromAutopsy, getCreatorIdentity } from "@/lib/system";
 import { providerOverview } from "@/lib/providers";
 import { buildAutopsy } from "@/lib/engines";
 
@@ -51,7 +51,8 @@ export async function GET(req: Request) {
         inQA: projects.filter((p) => p.stage === "qa" || p.status === "blocked_qa").length,
         published: projects.filter((p) => p.stage === "published").length,
       };
-      return json({ channels: chans, channel, niche, opportunities: opps, trends, projects, ideas, strategy: strat, memory: memory[0] ?? null, performances, calendar: cal, health, jobs, pipeline });
+      const creatorIdentity = channel ? await getCreatorIdentity(channel.id) : null;
+      return json({ channels: chans, channel, niche, opportunities: opps, trends, projects, ideas, strategy: strat, memory: memory[0] ?? null, performances, creatorIdentity, calendar: cal, health, jobs, pipeline });
     }
 
     if (action === "jobs") return json({ jobs: await recentJobs(50) });

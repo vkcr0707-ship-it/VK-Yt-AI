@@ -288,6 +288,7 @@ export const videoProjects = pgTable("video_projects", {
   stage: text("stage").default("research"),
   status: text("status").default("active"),
   error: text("error").default(""),
+  creatorIdentity: jsonb("creator_identity").$type<Record<string, unknown>>().default({}),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -525,6 +526,13 @@ export const automationSettings = pgTable("automation_settings", {
   maxVideosPerWeek: integer("max_videos_per_week").default(3),
   maxCostPerVideo: real("max_cost_per_video").default(5.0),
   allowedNiches: jsonb("allowed_niches").$type<string[]>().default([]),
+  creatorName: text("creator_name").default("Vinod Kumar").notNull(),
+  brandName: text("brand_name").default("VK YouTube AI").notNull(),
+  creatorHandle: text("creator_handle").default(""),
+  copyrightLine: text("copyright_line").default("© 2026 Vinod Kumar").notNull(),
+  aiAttribution: text("ai_attribution").default("Produced with VK YouTube AI").notNull(),
+  socialLinks: jsonb("social_links").$type<string[]>().default([]),
+  includeSpokenAttribution: boolean("include_spoken_attribution").default(false).notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 

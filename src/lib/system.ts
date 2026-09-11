@@ -280,7 +280,13 @@ export async function renderVideo(projectId: string, edl: {
   resolution: string; aspectRatio: string; clips: { start: number; end: number; caption: string; textOverlay: string; kenburns?: string }[]; captions?: { enabled: boolean };
 }, audioFiles: string[], jobLog: (m: string) => Promise<void> | void): Promise<RenderResult> {
   ensureDirs();
-  const totalDur = edl.clips.length ? edl.clips[edl.clips.length - 1].end : 10;
+  const projectRows = await db.select().from(s.videoProjects).where(eq(s.videoProjects.id, projectId)).limit(1);
+  const nicheRows = projectRows[0] ? await db.select().from(s.niches).where(eq(s.niches.id, projectRows[0].nicheId)).limit(1) : [];
+  const snapshot = projectRows[0]?.creatorIdentity as Partial<CreatorIdentity> | null;
+  const identity = snapshot?.creatorName ? mergeCreatorIdentity(snapshot) : (nicheRows[0] ? await getCreatorIdentity(nicheRows[0].channelId) : mergeCreatorIdentity());
+  const creditText = [identity?.creatorName && `Created by ${identity.creatorName}`, identity?.brandName && `Produced with ${identity.brandName}`, identity?.aiAttribution, identity?.copyrightLine].filter(Boolean).join("\\n");
+  const clips = creditText ? [...edl.clips, { start: edl.clips.length ? edl.clips[edl.clips.length - 1].end : 0, end: (edl.clips.length ? edl.clips[edl.clips.length - 1].end : 0) + 4, caption: "", textOverlay: creditText }] : edl.clips;
+  const totalDur = clips.length ? clips[clips.length - 1].end : 10;
   const [W, H] = (edl.resolution || "1920x1080").split("x").map(Number);
   const w = W || 1920, h = H || 1080;
   const stamp = Date.now();
@@ -290,7 +296,7 @@ export async function renderVideo(projectId: string, edl: {
   const previewAbs = join(GEN_DIR, previewName);
 
   // Always build an animated HTML preview (storyboard player) — real timed playback of scenes/captions.
-  const previewHtml = buildPreviewHtml(projectId, edl, totalDur, w, h);
+  const previewHtml = buildPreviewHtml(projectId, { ...edl, clips }, totalDur, w, h);
   writeFileSync(previewAbs, previewHtml);
 
   if (!ffmpegAvailable()) {
@@ -302,7 +308,7 @@ export async function renderVideo(projectId: string, edl: {
   const colors = ["0x0f172a", "0x1e1b4b", "0x052e16", "0x18181b", "0x111827"];
   const filterParts: string[] = [];
   const inputs: string[] = [];
-  edl.clips.forEach((c, i) => {
+  clips.forEach((c, i) => {
     const dur = Math.max(0.5, c.end - c.start);
     inputs.push("-f", "lavfi", "-i", `color=c=${colors[i % colors.length]}:s=${w}x${h}:d=${dur}:r=30`);
     let vf = `zoompan=z='min(zoom+0.0015,1.3)':d=${Math.round(dur * 30)}:s=${w}x${h}:fps=30`;
@@ -312,7 +318,7 @@ export async function renderVideo(projectId: string, edl: {
     vf += `,format=yuv420p`;
     filterParts.push(`[${i}:v]${vf}[v${i}]`);
   });
-  const concat = edl.clips.map((_, i) => `[v${i}]`).join("") + `concat=n=${edl.clips.length}:v=1:a=0[vout]`;
+  const concat = clips.map((_, i) => `[v${i}]`).join("") + `concat=n=${clips.length}:v=1:a=0[vout]`;
   const existingAudio = audioFiles.filter((a) => a && existsSync(join(process.cwd(), "public", a.replace(/^\//, ""))));
   const audioInputArgs: string[] = [];
   existingAudio.forEach((a) => { audioInputArgs.push("-i", join(process.cwd(), "public", a.replace(/^\//, ""))); });
@@ -320,9 +326,9 @@ export async function renderVideo(projectId: string, edl: {
   const args: string[] = [...inputs, ...audioInputArgs, "-filter_complex", filterFull || "nullsrc", "-map", "[vout]"];
   if (existingAudio.length > 0) {
     // Use first narration track, pad/trim to video length, loudnorm + silenceremove
-    args.push("-map", `${edl.clips.length}:a`, "-af", `aresample=44100,silenceremove=start_periods=1:start_duration=0.2:start_threshold=-50dB,loudnorm,apad=whole_dur=${totalDur}`, "-shortest");
+    args.push("-map", `${clips.length}:a`, "-af", `aresample=44100,silenceremove=start_periods=1:start_duration=0.2:start_threshold=-50dB,loudnorm,apad=whole_dur=${totalDur}`, "-shortest");
   } else {
-    args.push("-f", "lavfi", "-i", `anullsrc=r=44100:cl=stereo:d=${totalDur}`, "-map", `${edl.clips.length}:a`, "-shortest");
+    args.push("-f", "lavfi", "-i", `anullsrc=r=44100:cl=stereo:d=${totalDur}`, "-map", `${clips.length}:a`, "-shortest");
   }
   args.push("-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-y", outAbs);
   await jobLog(`Rendering ${edl.clips.length} clips → ${w}x${h}, ${totalDur.toFixed(1)}s`);
@@ -722,9 +728,11 @@ export async function ensureProjectForIdea(ideaId: string): Promise<string> {
   const existing = await db.select().from(s.videoProjects).where(eq(s.videoProjects.ideaId, ideaId)).limit(1);
   if (existing[0]) return existing[0].id;
   const isShort = idea.format === "short";
+  const nicheRows = await db.select().from(s.niches).where(eq(s.niches.id, idea.nicheId)).limit(1);
+  const identity = nicheRows[0] ? await getCreatorIdentity(nicheRows[0].channelId) : await getCreatorIdentity("");
   const rows = await db.insert(s.videoProjects).values({
     nicheId: idea.nicheId, ideaId, title: idea.title, format: idea.format ?? "long-form",
-    aspectRatio: isShort ? "9:16" : "16:9", resolution: isShort ? "1080x1920" : "1920x1080", stage: "script",
+    aspectRatio: isShort ? "9:16" : "16:9", resolution: isShort ? "1080x1920" : "1920x1080", stage: "script", creatorIdentity: identity,
   }).returning({ id: s.videoProjects.id });
   return rows[0].id;
 }
@@ -796,6 +804,41 @@ export async function getMemory(channelId: string) {
     };
   }
   return { successfulTopics: [] as string[], failedTopics: [] as string[], successfulHooks: [] as string[], successfulFormats: [] as string[] };
+}
+
+export type CreatorIdentity = {
+  creatorName: string;
+  brandName: string;
+  creatorHandle: string;
+  copyrightLine: string;
+  aiAttribution: string;
+  socialLinks: string[];
+  includeSpokenAttribution: boolean;
+};
+function mergeCreatorIdentity(value?: Partial<CreatorIdentity> | null): CreatorIdentity {
+  return {
+    creatorName: value?.creatorName || "Vinod Kumar",
+    brandName: value?.brandName || "VK YouTube AI",
+    creatorHandle: value?.creatorHandle || "",
+    copyrightLine: value?.copyrightLine || "© 2026 Vinod Kumar",
+    aiAttribution: value?.aiAttribution || "Produced with VK YouTube AI",
+    socialLinks: value?.socialLinks ?? [],
+    includeSpokenAttribution: value?.includeSpokenAttribution ?? false,
+  };
+}
+
+export async function getCreatorIdentity(channelId: string): Promise<CreatorIdentity> {
+  const rows = await db.select().from(s.automationSettings).where(eq(s.automationSettings.channelId, channelId)).limit(1);
+  const settings = rows[0];
+  return mergeCreatorIdentity(settings ? {
+    creatorName: settings.creatorName ?? undefined,
+    brandName: settings.brandName ?? undefined,
+    creatorHandle: settings.creatorHandle ?? undefined,
+    copyrightLine: settings.copyrightLine ?? undefined,
+    aiAttribution: settings.aiAttribution ?? undefined,
+    socialLinks: (settings.socialLinks as string[] | null) ?? undefined,
+    includeSpokenAttribution: settings.includeSpokenAttribution ?? undefined,
+  } : null);
 }
 
 export async function updateMemoryFromAutopsy(channelId: string, topic: string, hook: string, format: string, outperformed: boolean) {
@@ -939,6 +982,10 @@ export async function runAutonomousLoop(nicheId: string, jobId: string, log: (m:
 
 export async function generatePackaging(projectId: string, topic: string, seedTitles: string[], niche: string) {
   ensureDirs();
+  const projectRows = await db.select().from(s.videoProjects).where(eq(s.videoProjects.id, projectId)).limit(1);
+  const nicheRows = projectRows[0] ? await db.select().from(s.niches).where(eq(s.niches.id, projectRows[0].nicheId)).limit(1) : [];
+  const snapshot = projectRows[0]?.creatorIdentity as Partial<CreatorIdentity> | null;
+  const identity = snapshot?.creatorName ? mergeCreatorIdentity(snapshot) : (nicheRows[0] ? await getCreatorIdentity(nicheRows[0].channelId) : mergeCreatorIdentity());
   const titles = [...new Set([...(seedTitles ?? []), ...E.generateTitles(topic, niche)])].slice(0, 6);
   for (const t of titles) {
     const sc = E.scoreTitle(t, topic);
@@ -964,7 +1011,9 @@ export async function generatePackaging(projectId: string, topic: string, seedTi
     { time: "6:00", title: "The reveal" }, { time: "8:00", title: "Takeaways" },
   ];
   const seo = E.buildSEOMetadata(best[0]?.title ?? topic, topic, niche, chapters, [niche, topic]);
-  await db.insert(s.seoMetadata).values({ projectId, ...seo }).onConflictDoUpdate({ target: s.seoMetadata.projectId, set: { ...seo } });
+  const credits = [identity?.creatorName && `Created by ${identity.creatorName}`, identity?.brandName && `Produced by ${identity.brandName}`, identity?.aiAttribution, identity?.copyrightLine, ...(identity?.creatorHandle ? [identity.creatorHandle] : []), ...((identity?.socialLinks as string[] | undefined) ?? [])].filter(Boolean).join("\n");
+  const creditedDescription = credits ? `${seo.description}\n\n${credits}` : seo.description;
+  await db.insert(s.seoMetadata).values({ projectId, ...seo, description: creditedDescription }).onConflictDoUpdate({ target: s.seoMetadata.projectId, set: { ...seo, description: creditedDescription } });
 }
 
 // ─── E2E self-test (Football pipeline verification) ───

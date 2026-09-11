@@ -268,7 +268,7 @@ export async function POST(req: Request) {
     if (action === "automation") {
       const b = await body<Record<string, unknown> & { channelId: string }>(req);
       const patch: Record<string, unknown> = {};
-      for (const k of ["mode", "autoResearch", "autoIdeas", "autoScript", "autoProduction", "autoUpload", "autoPublishing", "autoAnalytics", "autoStrategy", "approvalGates", "maxVideosPerDay", "maxVideosPerWeek", "maxCostPerVideo"] as const) {
+      for (const k of ["mode", "autoResearch", "autoIdeas", "autoScript", "autoProduction", "autoUpload", "autoPublishing", "autoAnalytics", "autoStrategy", "approvalGates", "maxVideosPerDay", "maxVideosPerWeek", "maxCostPerVideo", "creatorName", "brandName", "creatorHandle", "copyrightLine", "aiAttribution", "socialLinks", "includeSpokenAttribution"] as const) {
         if (b[k] !== undefined) patch[k] = b[k];
       }
       patch.updatedAt = new Date();

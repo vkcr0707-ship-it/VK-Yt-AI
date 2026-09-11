@@ -243,6 +243,7 @@ function TodayTab({ dash, say, runBusy, busy, refresh, channelId, nicheId }: Tab
   const strat = dash.strategy as AnyRec | null;
   const pipe = (dash.pipeline as AnyRec) ?? {};
   const memory = (dash.memory as AnyRec) ?? {};
+  const identity = (dash.creatorIdentity as AnyRec) ?? {};
   const ideas = arr<AnyRec>(dash.ideas);
   const topOpportunity = arr<AnyRec>(dash.opportunities)[0];
   const nextAction = str(strat?.recommendation) || (topOpportunity ? `Generate a first draft around "${str(topOpportunity.topic)}".` : "Run Generate Everything to discover the next opportunity.");
@@ -252,7 +253,7 @@ function TodayTab({ dash, say, runBusy, busy, refresh, channelId, nicheId }: Tab
         <div className="grid md:grid-cols-4 gap-3 text-sm">
           <div className="bg-slate-800 rounded-lg p-3 md:col-span-2"><p className="text-xs uppercase tracking-wide text-slate-400">Recommended next action</p><p className="font-bold text-green-300 mt-1">{nextAction}</p><p className="text-slate-400 mt-2">Confidence: {strat ? num(strat.confidence).toFixed(0) : "not scored"}</p></div>
           <div className="bg-slate-800 rounded-lg p-3"><p className="text-xs uppercase tracking-wide text-slate-400">Today&apos;s best opportunity</p><p className="font-bold mt-1">{str(topOpportunity?.topic, "No opportunity yet")}</p><p className="text-amber-300 mt-2">Score {topOpportunity ? num(topOpportunity.opportunityScore).toFixed(1) : "--"}</p></div>
-          <div className="bg-slate-800 rounded-lg p-3"><p className="text-xs uppercase tracking-wide text-slate-400">Channel intelligence</p><p className="font-bold mt-1">{num(memory.successfulTopics ? arr(memory.successfulTopics).length : 0)} learned wins</p><p className="text-slate-400 mt-2">{num(health.samples)} performance samples</p></div>
+          <div className="bg-slate-800 rounded-lg p-3"><p className="text-xs uppercase tracking-wide text-slate-400">Channel intelligence</p><p className="font-bold mt-1">{num(memory.successfulTopics ? arr(memory.successfulTopics).length : 0)} learned wins</p><p className="text-slate-400 mt-2">{num(health.samples)} performance samples · {str(identity.brandName, "VK YouTube AI")}</p></div>
         </div>
         <div className="mt-3"><p className="text-xs uppercase tracking-wide text-slate-400 mb-2">AI ideas ({ideas.length})</p>{ideas.length ? <div className="grid md:grid-cols-2 gap-x-5">{ideas.slice(0, 20).map((idea, index) => <div key={str(idea.id, String(index))} className="flex justify-between gap-3 py-1.5 border-b border-slate-800"><span className="truncate">{index + 1}. {str(idea.title)}</span><Score v={num(idea.score)} /></div>)}</div> : <p className="text-slate-400">No persisted ideas yet. Generate Everything will research, score, and create them.</p>}</div>
       </Card>
@@ -960,6 +961,14 @@ function SettingsTab({ channelId, nicheId, providers, say, runBusy, busy, refres
             </div>
           </div>
         ) : <p className="text-sm text-slate-400">No automation settings.</p>}
+      </Card>
+      <Card title="✍ Creator Identity & Credits">
+        {auto ? <div className="grid md:grid-cols-2 gap-3 text-sm">
+          {(["creatorName", "brandName", "creatorHandle", "copyrightLine", "aiAttribution"] as const).map((key) => <label key={key}>{key === "creatorName" ? "Creator name" : key === "brandName" ? "Brand / channel name" : key === "creatorHandle" ? "Creator handle (optional)" : key === "copyrightLine" ? "Copyright / credit line" : "AI production attribution"}<input className="w-full bg-slate-800 rounded-lg p-2 mt-1" defaultValue={str(auto[key])} onBlur={(e) => save({ [key]: e.target.value })} /></label>)}
+          <label>Website / social links (one per line)<textarea className="w-full bg-slate-800 rounded-lg p-2 mt-1 h-20" defaultValue={arr<string>(auto.socialLinks).join("\n")} onBlur={(e) => save({ socialLinks: e.target.value.split("\n").map((value) => value.trim()).filter(Boolean) })} /></label>
+          <label className="flex items-center gap-2 bg-slate-800 rounded-lg p-2 h-fit"><input type="checkbox" defaultChecked={Boolean(auto.includeSpokenAttribution)} onChange={(e) => save({ includeSpokenAttribution: e.target.checked })} /> Include attribution in spoken narration</label>
+          <p className="text-xs text-slate-400 md:col-span-2">Credits are added to descriptions, end cards, metadata, and project history. Spoken attribution stays off unless explicitly enabled.</p>
+        </div> : <p className="text-sm text-slate-400">No settings loaded.</p>}
       </Card>
       <div className="grid md:grid-cols-2 gap-4">
         <Card title={`💰 Costs (total $${num(costs?.total).toFixed(4)})`}>
