@@ -59,7 +59,9 @@ LLM_API_KEY (LLM_BASE_URL, LLM_MODEL) · TTS_API_KEY · IMAGE_API_KEY · TAVILY_
 - Signup, login, authenticated channel listing, channel creation, homepage, and `/api/health`: PASS
 
 ## Deployment status
-- GitHub: local repository initialized; no remote configured; GitHub CLI unavailable.
+- GitHub: verified at `https://github.com/vkcr0707-ship-it/VK-Yt-AI`; latest pushed commit `c69b742`.
 - Hosting: not deployed.
+- Deployment setup: Render Docker service defined in `render.yaml`; Docker includes FFmpeg.
+- Human action: authorize a Render account and connect the GitHub repository before service creation.
 - Live external integrations: IMPLEMENTED — CREDENTIAL REQUIRED.
 - See `DEPLOYMENT.md` and `REQUIRED_CREDENTIALS.md` for the exact deployment architecture and remaining human actions.

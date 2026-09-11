@@ -23,10 +23,14 @@ This project is built to run without fake credentials, but live external integra
 - `SESSION_SECRET` — signing secret for future auth hardening
 
 ## Human-only actions still required
+- Render hosting authorization — connect the GitHub repository and create the Blueprint from `render.yaml`
 - Google Cloud OAuth setup and consent for YouTube connector
 - YouTube channel authorization / account verification
 - Hosting account login for deployment if you want public production
 - Any actual API key purchase or billing approval
+
+## Current deployment blocker
+- Render account authorization is required before the service can be created. After authorization, set `DATABASE_URL` and `NEXT_PUBLIC_APP_URL` in Render’s secret environment settings. Add provider credentials only when enabling those live integrations.
 
 ## Important rule
 Never commit real secrets into source control. Use environment variables and local secrets management only.
