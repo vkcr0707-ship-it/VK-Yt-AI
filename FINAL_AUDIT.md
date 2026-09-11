@@ -62,6 +62,7 @@ LLM_API_KEY (LLM_BASE_URL, LLM_MODEL) · TTS_API_KEY · IMAGE_API_KEY · TAVILY_
 - GitHub: verified at `https://github.com/vkcr0707-ship-it/VK-Yt-AI`; latest pushed commit `c69b742`.
 - Hosting: not deployed.
 - Deployment setup: OCI Always Free VM target documented; Docker Compose includes the existing app, FFmpeg image support, Redis, and persistent volumes.
+- Vercel schema fix: `vercel-build` runs `drizzle-kit push --config=drizzle.config.ts` before `next build`, preventing an unmigrated production DATABASE_URL from serving the app.
 - Human action: create/authorize an OCI Free Tier account and VM. OCI signup may require identity and card/debit verification.
 - Live external integrations: IMPLEMENTED — CREDENTIAL REQUIRED.
 - See `DEPLOYMENT.md` and `REQUIRED_CREDENTIALS.md` for the exact deployment architecture and remaining human actions.

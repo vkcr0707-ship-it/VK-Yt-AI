@@ -6,7 +6,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "vercel-build": "drizzle-kit push --config=drizzle.config.ts && next build"
   },
   "dependencies": {
     "dotenv": "17.3.1",
