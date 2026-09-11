@@ -8,7 +8,7 @@
 - Rendering: FFmpeg must be installed in the runtime for MP4 output. Without it, the application produces an honest timed HTML preview.
 - Storage: generated assets are written under `public/gen`; use persistent/object storage before scaling beyond a single instance.
 - Scheduling: no external scheduler is currently wired; invoke the autonomous loop through a protected scheduler endpoint or platform cron when enabled.
-- Recommended host: Render Docker web service, because it can run the combined Next.js API/frontend and install FFmpeg in the same runtime.
+- Recommended host: an OCI Always Free VM, because it can run Docker Compose on a persistent Linux VPS without changing the application architecture.
 
 ## Local development
 1. Copy `.env.example` to `.env` and provide a real `DATABASE_URL`.
@@ -22,7 +22,7 @@
 - Lint: `npm run lint`
 - Build: `npm run build`
 - Start: `npm run start -- -p 3001`
-- Hosted container: `docker build -t vk-yt-ai .` then `docker run --env-file .env -p 3000:3000 vk-yt-ai`
+- Hosted Compose: `docker compose up -d --build`
 - Health check: `GET /api/health`
 
 ## Environment variables
@@ -57,10 +57,10 @@
 - Protect scheduler/autonomous-loop triggers with authentication and rate limits.
 - Use persistent/object storage for generated media on ephemeral hosts.
 
-## Render deployment
-- `render.yaml` defines the Docker web service and generated `SESSION_SECRET`.
-- Connect the GitHub repository `vkcr0707-ship-it/VK-Yt-AI` in Render and create the Blueprint.
-- Set `DATABASE_URL` to the production Neon URL in Render’s secret environment settings.
-- Run `npx drizzle-kit push --config=drizzle.config.ts` once against the intended production database before traffic is enabled; review changes first and never delete existing data.
-- Set `NEXT_PUBLIC_APP_URL` and `YOUTUBE_REDIRECT_URI` to the final HTTPS Render hostname after the service URL is assigned.
-- Configure persistent storage for `public/gen` or move generated media to object storage before relying on rendered files across deploys.
+## OCI Always Free deployment
+- Create an Ubuntu or Oracle Linux Always Free VM, install Docker Engine and the Compose plugin, and allow TCP `80`/`443` in the VM firewall and OCI security list.
+- Clone `https://github.com/vkcr0707-ship-it/VK-Yt-AI.git` on the VM and create `.env` from `.env.example` using secret storage or protected file permissions.
+- Run `npx drizzle-kit push --config=drizzle.config.ts` from a one-off migration container or local admin shell against the intended Neon database; review changes first and never delete existing data.
+- Run `docker compose up -d --build`; the app container includes FFmpeg and the Compose file includes Redis with persistent volumes.
+- Put Caddy or Nginx in front for HTTPS, then set `NEXT_PUBLIC_APP_URL` and `YOUTUBE_REDIRECT_URI` to the final HTTPS hostname.
+- OCI signup may require identity and card/debit verification even when using Always Free resources; no deployment can be created until that human account action is complete.

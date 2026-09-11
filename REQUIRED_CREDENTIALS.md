@@ -23,7 +23,7 @@ This project is built to run without fake credentials, but live external integra
 - `SESSION_SECRET` — signing secret for future auth hardening
 
 ## Human-only actions still required
-- Render hosting authorization — connect the GitHub repository and create the Blueprint from `render.yaml`
+- OCI hosting authorization — create an Always Free VM and authorize the account; signup may require identity and card/debit verification
 - Google Cloud OAuth setup and consent for YouTube connector
 - YouTube channel authorization / account verification
 - Hosting account login for deployment if you want public production
