@@ -526,8 +526,11 @@ export const jobHandlers: Record<string, JobHandler> = {
       });
     }
     const gen = E.generateScript({ title: idea.title, hook: idea.hook ?? "", angle: idea.angle ?? "", narrativeStructure: idea.narrativeStructure ?? "", durationSec: idea.durationSec ?? 480 }, facts, niche?.primaryNiche ?? "video");
+    const identity = niche ? await getCreatorIdentity(niche.channelId) : null;
+    const scriptBody = identity?.includeSpokenAttribution ? `${gen.body}\n\nCreated by ${identity.creatorName}. Produced with ${identity.brandName}.` : gen.body;
     await prog(60);
-    const srows = await db.insert(s.scripts).values({ ideaId, nicheId: idea.nicheId, title: idea.title, body: gen.body, wordCount: gen.wordCount, estimatedDurationSec: gen.estimatedDurationSec, structure: gen.structure as Record<string, unknown>, status: "draft" }).returning({ id: s.scripts.id });
+    const wordCount = scriptBody.trim().split(/\s+/).length;
+    const srows = await db.insert(s.scripts).values({ ideaId, nicheId: idea.nicheId, title: idea.title, body: scriptBody, wordCount, estimatedDurationSec: gen.estimatedDurationSec, structure: gen.structure as Record<string, unknown>, status: "draft" }).returning({ id: s.scripts.id });
     await db.update(s.contentIdeas).set({ status: "scripted" }).where(eq(s.contentIdeas.id, ideaId));
     await recordCost(null, jobId, "llm", 0.02, "script generation");
     await prog(100);
