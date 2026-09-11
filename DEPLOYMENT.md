@@ -20,7 +20,7 @@
 - Install: `npm install`
 - Typecheck: `npm run typecheck`
 - Lint: `npm run lint`
-- Build: `npm run build`
+- Build: `npm run build` (synchronizes Drizzle schema, then builds)
 - Start: `npm run start -- -p 3001`
 - Vercel build: `npm run vercel-build` (synchronizes Drizzle schema, then builds)
 - Hosted Compose: `docker compose up -d --build`
@@ -36,7 +36,7 @@
 ## Database and migrations
 - Use the managed production PostgreSQL URL in the deployment secret store.
 - Apply `drizzle/0000_tense_the_renegades.sql` through the deployment migration step, or run `npx drizzle-kit push --config=drizzle.config.ts` against a newly provisioned database.
-- Vercel uses `npm run vercel-build`, which runs `drizzle-kit push` against its `DATABASE_URL` before `next build`; review the migration output on each deployment.
+- Both build commands run `drizzle-kit push` against the deployment `DATABASE_URL` before `next build`; this prevents a Vercel build-command override from skipping schema synchronization.
 - Verify `/api/health` and a real authenticated read/write operation after migration.
 - Do not delete existing data to resolve schema drift.
 
