@@ -107,8 +107,10 @@ const signupSchema = z.object({ email: z.string().email(), password: z.string().
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
 const AUTH_BUILD = "auth-marker-1";
 
-function authResponse(response: Response): Response {
+function authResponse(response: Response, stage = "response", error = ""): Response {
   response.headers.set("X-AUTH-BUILD", AUTH_BUILD);
+  response.headers.set("X-AUTH-STAGE", stage);
+  if (error) response.headers.set("X-AUTH-ERROR", error.replace(/postgres(?:ql)?:\/\/[^\s]+/gi, "[redacted-database-url]").replace(/\s+/g, " ").slice(0, 500));
   return response;
 }
 
@@ -224,25 +226,33 @@ export async function POST(req: Request) {
     }
 
     if (action === "run-job") {
+      let stage = "route-entered";
       const gate = rateLimit(user.id, "run-job", { limit: 20, windowMs: 60_000 });
       if (!gate.allowed) return rateLimitResponse(gate.retryAfterSec);
       const b = await body<{ type: string; nicheId?: string; ideaId?: string; scriptId?: string; projectId?: string; uploadId?: string; maxVideos?: number }>(req);
-      const allowed = ["RESEARCH", "TREND", "IDEA", "SCRIPT", "FACT_CHECK", "ASSET", "VOICE", "RENDER", "QUALITY", "UPLOAD", "PROCESSING", "ANALYTICS", "AUTONOMOUS"];
+      if (!p.success) return authResponse(json({ error: "Invalid login data" }, 400), "validation-failed");
+      stage = "validation-passed";
       if (!allowed.includes(b.type)) return json({ error: "Unknown job type" }, 400);
+        stage = "user-select-started";
       const payload: Record<string, unknown> = {};
-      for (const k of ["nicheId", "ideaId", "scriptId", "projectId", "uploadId", "maxVideos"] as const) {
+        stage = "user-select-succeeded";
+        if (!rows[0]) return authResponse(json({ error: "Invalid email or password" }, 401), "user-select-succeeded");
+        stage = "password-verification-started";
         const v = (b as Record<string, unknown>)[k];
-        if (v) payload[k] = v;
+        stage = "password-verification-succeeded";
+        if (!passwordValid) return authResponse(json({ error: "Invalid email or password" }, 401), "password-verification-succeeded");
       }
+        stage = "session-insert-started";
       if ((b.nicheId && !await userOwnsNiche(user.id, b.nicheId)) || (b.ideaId && !await userOwnsIdea(user.id, b.ideaId)) || (b.scriptId && !await userOwnsScript(user.id, b.scriptId)) || (b.projectId && !await userOwnsProject(user.id, b.projectId)) || (b.uploadId && !await userOwnsUpload(user.id, b.uploadId))) return json({ error: "Unauthorized" }, 401);
+        stage = "session-insert-succeeded";
       const jobId = await createJob(b.type, payload);
       if (process.env.WORKER_MODE !== "external") await runJobNow(jobId);
-      const rows = await db.select().from(s.jobs).where(eq(s.jobs.id, jobId)).limit(1);
+        return authResponse(res, "response-created");
       return json({ job: rows[0] });
     }
 
     if (action === "select-idea") {
-      const b = await body<{ ideaId: string }>(req);
+        return authResponse(json({ error: "Login temporarily unavailable" }, 503), stage, formatDatabaseError(error));
       if (!await userOwnsIdea(user.id, b.ideaId)) return json({ error: "Unauthorized" }, 401);
       await db.update(s.contentIdeas).set({ status: "selected" }).where(eq(s.contentIdeas.id, b.ideaId));
       const projectId = await ensureProjectForIdea(b.ideaId);
