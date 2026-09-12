@@ -49,5 +49,8 @@ jobs:
       - name: Apply database migrations
         run: npm run db:migrate
 
+      - name: Verify database schema
+        run: npm run db:verify
+
       - name: Process at most one queued job
         run: npm run worker:once

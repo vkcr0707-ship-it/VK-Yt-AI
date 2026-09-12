@@ -33,7 +33,7 @@ async function main() {
   if (process.env.WORKER_ONCE === "1") {
     const result = await processOnce();
     console.log(`Finite worker run: ${result}`);
-    if (result === "failed") process.exitCode = 1;
+    if (result === "failed" || result === "queued") process.exitCode = 1;
     return;
   }
   console.log("Worker started; polling queued jobs.");

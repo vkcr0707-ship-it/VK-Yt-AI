@@ -1,6 +1,6 @@
 // Content API: auth, setup wizard, niche intelligence, research, trends,
 // opportunities, ideas, scripts, facts, storyboard, calendar, strategy, memory.
-import { db } from "@/db";
+import { db, formatDatabaseError } from "@/db";
 import * as s from "@/db/schema";
 import { eq, desc, and } from "drizzle-orm";
 import { z } from "zod";
@@ -96,7 +96,8 @@ export async function GET(req: Request) {
     }
     return json({ error: `Unknown action: ${action}` }, 400);
   } catch (e) {
-    return json({ error: e instanceof Error ? e.message : "failed" }, 500);
+    console.error("[content] request error", formatDatabaseError(e));
+    return json({ error: "Request failed" }, 500);
   }
 }
 
@@ -127,19 +128,24 @@ export async function POST(req: Request) {
       if (!gate.allowed) return rateLimitResponse(gate.retryAfterSec);
       const p = loginSchema.safeParse(await body(req));
       if (!p.success) return json({ error: "Invalid login data" }, 400);
-      const rows = await db.select().from(s.users).where(eq(s.users.email, p.data.email)).limit(1);
-      if (!rows[0] || !verifyPassword(p.data.password, rows[0].passwordHash)) return json({ error: "Invalid email or password" }, 401);
-      const token = crypto.randomUUID() + crypto.randomUUID();
-      await db.insert(s.sessions).values({ userId: rows[0].id, token, expiresAt: new Date(Date.now() + 30 * 86400000) });
-      const res = Response.json({ user: { id: rows[0].id, email: rows[0].email, name: rows[0].name } });
-      res.headers.set("Set-Cookie", `ayt_session=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000`);
-      return res;
+      try {
+        const rows = await db.select().from(s.users).where(eq(s.users.email, p.data.email)).limit(1);
+        if (!rows[0] || !verifyPassword(p.data.password, rows[0].passwordHash)) return json({ error: "Invalid email or password" }, 401);
+        const token = crypto.randomUUID() + crypto.randomUUID();
+        await db.insert(s.sessions).values({ userId: rows[0].id, token, expiresAt: new Date(Date.now() + 30 * 86400000) });
+        const res = Response.json({ user: { id: rows[0].id, email: rows[0].email, name: rows[0].name } });
+        res.headers.set("Set-Cookie", `ayt_session=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000`);
+        return res;
+      } catch (error) {
+        console.error("[auth] login database error", formatDatabaseError(error));
+        return json({ error: "Login temporarily unavailable" }, 503);
+      }
     }
     if (action === "logout") {
       const token = getTokenFromRequest(req);
       if (token) await db.delete(s.sessions).where(eq(s.sessions.token, token));
       const res = Response.json({ ok: true });
-      res.headers.set("Set-Cookie", "ayt_session=; Path=/; HttpOnly; Max-Age=0");
+      res.headers.set("Set-Cookie", "ayt_session=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0");
       return res;
     }
     const user = await getSessionUser(req);
@@ -317,7 +323,8 @@ export async function POST(req: Request) {
 
     return json({ error: `Unknown action: ${action}` }, 400);
   } catch (e) {
-    return json({ error: e instanceof Error ? e.message : "failed" }, 500);
+    console.error("[content] request error", formatDatabaseError(e));
+    return json({ error: "Request failed" }, 500);
   }
 }
 
@@ -336,6 +343,7 @@ export async function DELETE(req: Request) {
     }
     return json({ error: "Unknown delete" }, 400);
   } catch (e) {
-    return json({ error: e instanceof Error ? e.message : "failed" }, 500);
+    console.error("[content] request error", formatDatabaseError(e));
+    return json({ error: "Request failed" }, 500);
   }
 }

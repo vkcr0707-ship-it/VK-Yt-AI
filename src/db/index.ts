@@ -56,7 +56,13 @@ const globalForDb = globalThis as typeof globalThis & {
 
 function createPool(): Pool {
   if (databaseUrl) {
-    return new Pool({ connectionString: databaseUrl });
+    return new Pool({
+      connectionString: databaseUrl,
+      max: 3,
+      connectionTimeoutMillis: 10_000,
+      idleTimeoutMillis: 10_000,
+      allowExitOnIdle: true,
+    });
   }
 
   const memDb = newDb();
@@ -65,9 +71,6 @@ function createPool(): Pool {
 }
 
 export const pool = globalForDb.__arenaNextJsPostgresqlPool ?? createPool();
-
-if (process.env.NODE_ENV !== "production") {
-  globalForDb.__arenaNextJsPostgresqlPool = pool;
-}
+globalForDb.__arenaNextJsPostgresqlPool = pool;
 
 export const db = drizzle(pool);

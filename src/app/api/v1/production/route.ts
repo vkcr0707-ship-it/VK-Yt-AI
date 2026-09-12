@@ -1,6 +1,6 @@
 // Production API: projects, storyboard scenes, EDL, assets, voice, renders,
 // thumbnails, titles, SEO, quality gates, uploads + YouTube OAuth, files, costs.
-import { db } from "@/db";
+import { db, formatDatabaseError } from "@/db";
 import * as s from "@/db/schema";
 import { eq, desc, and, inArray, or } from "drizzle-orm";
 import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, projectScenes, generatePackaging, oauthConfigured, oauthUrl, verifyOAuthState, exchangeCode, authenticatedYouTubeChannel, encryptToken, runQuality, projectCost, listGenFiles, ensureDirs } from "@/lib/system";
@@ -157,7 +157,8 @@ export async function GET(req: Request) {
     }
     return json({ error: `Unknown action: ${action}` }, 400);
   } catch (e) {
-    return json({ error: e instanceof Error ? e.message : "failed" }, 500);
+    console.error("[production] request error", formatDatabaseError(e));
+    return json({ error: "Request failed" }, 500);
   }
 }
 
@@ -260,6 +261,7 @@ export async function POST(req: Request) {
     }
     return json({ error: `Unknown action: ${action}` }, 400);
   } catch (e) {
-    return json({ error: e instanceof Error ? e.message : "failed" }, 500);
+    console.error("[production] request error", formatDatabaseError(e));
+    return json({ error: "Request failed" }, 500);
   }
 }

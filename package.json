@@ -4,7 +4,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts",
+    "db:migrate": "node --import tsx scripts/db-migrate.ts",
+    "db:verify": "node --import tsx scripts/db-verify.ts",
     "worker": "node --import tsx src/worker.ts",
     "worker:once": "node --import tsx src/worker.ts",
     "start": "next start",

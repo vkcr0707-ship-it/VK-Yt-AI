@@ -1,6 +1,6 @@
 // Ops API: dashboard, jobs, analytics, autopsy, costs, providers, quota,
 // end-to-end pipeline test, failure drill.
-import { db } from "@/db";
+import { db, formatDatabaseError } from "@/db";
 import * as s from "@/db/schema";
 import { eq, desc, and, gte, inArray } from "drizzle-orm";
 import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, userCanAccessJob, recentJobs, runJobNow, channelHealth, getQuota, runE2EPipeline, runFailureDrill, ffmpegAvailable, ffprobeAvailable, mediaCapabilityStatus, updateMemoryFromAutopsy, getCreatorIdentity } from "@/lib/system";
@@ -95,7 +95,8 @@ export async function GET(req: Request) {
     }
     return json({ error: `Unknown action: ${action}` }, 400);
   } catch (e) {
-    return json({ error: e instanceof Error ? e.message : "failed" }, 500);
+    console.error("[ops] request error", formatDatabaseError(e));
+    return json({ error: "Request failed" }, 500);
   }
 }
 
@@ -192,6 +193,7 @@ export async function POST(req: Request) {
     }
     return json({ error: `Unknown action: ${action}` }, 400);
   } catch (e) {
-    return json({ error: e instanceof Error ? e.message : "failed" }, 500);
+    console.error("[ops] request error", formatDatabaseError(e));
+    return json({ error: "Request failed" }, 500);
   }
 }
