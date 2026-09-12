@@ -1,4 +1,4 @@
-import { db } from "@/db";
+import { db, formatDatabaseError } from "@/db";
 import * as s from "@/db/schema";
 import { asc, eq, sql } from "drizzle-orm";
 import { runJobNow } from "@/lib/system";
@@ -44,6 +44,7 @@ async function main() {
 }
 
 void main().catch((error) => {
+  console.error(formatDatabaseError(error));
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });

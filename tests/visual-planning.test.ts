@@ -45,6 +45,15 @@ test("storage keys reject traversal and rate limits return a bounded denial", as
   assert.equal(rateLimit("test-key", "test", { limit: 1, windowMs: 60_000 }).allowed, false);
 });
 
+test("database diagnostics redact connection URLs and expose safe PostgreSQL fields", async () => {
+  const { formatDatabaseError } = await import("../src/db");
+  const diagnostics = formatDatabaseError({ cause: { code: "28P01", message: "password authentication failed", detail: "role rejected", hint: "check credentials", connectionString: "postgresql://user:secret@example.invalid:5432/app" } });
+  assert.match(diagnostics, /code=28P01/);
+  assert.match(diagnostics, /detail=role rejected/);
+  assert.match(diagnostics, /hint=check credentials/);
+  assert.doesNotMatch(diagnostics, /secret|postgresql:\/\//i);
+});
+
 test("private S3 adapter supports mocked put, get, head, delete, and missing objects", async () => {
   const { S3StorageAdapter, safeMediaKey, storageStatus } = await import("../src/lib/storage");
   const objects = new Map<string, { body: Buffer; metadata: Record<string, string>; contentType: string }>();
