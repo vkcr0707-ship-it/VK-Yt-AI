@@ -219,7 +219,7 @@ export async function POST(req: Request) {
       }
       if ((b.nicheId && !await userOwnsNiche(user.id, b.nicheId)) || (b.ideaId && !await userOwnsIdea(user.id, b.ideaId)) || (b.scriptId && !await userOwnsScript(user.id, b.scriptId)) || (b.projectId && !await userOwnsProject(user.id, b.projectId)) || (b.uploadId && !await userOwnsUpload(user.id, b.uploadId))) return json({ error: "Unauthorized" }, 401);
       const jobId = await createJob(b.type, payload);
-      await runJobNow(jobId);
+      if (process.env.WORKER_MODE !== "external") await runJobNow(jobId);
       const rows = await db.select().from(s.jobs).where(eq(s.jobs.id, jobId)).limit(1);
       return json({ job: rows[0] });
     }

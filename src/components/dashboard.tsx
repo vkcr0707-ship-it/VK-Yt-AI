@@ -532,7 +532,7 @@ function ProjectView({ data, say, runBusy, busy, reload }: TabProps & { data: An
           <Btn tone="bg-slate-700" onClick={() => runBusy("Building storyboard+EDL…", async () => { await api("/api/v1/content?action=build-storyboard", { body: { projectId: p.id, scriptId: p.scriptId } }); await reload(); say("ok", "Storyboard + EDL built."); })}>Storyboard + EDL</Btn>
           <Btn tone="bg-slate-700" onClick={() => runBusy("Generating assets…", async () => { await api("/api/v1/content?action=run-job", { body: { type: "ASSET", projectId: p.id } }); await reload(); say("ok", "Assets generated."); })}>Assets</Btn>
           <Btn tone="bg-slate-700" onClick={() => runBusy("Generating voice…", async () => { await api("/api/v1/content?action=run-job", { body: { type: "VOICE", projectId: p.id } }); await reload(); say("ok", "Voice generated."); })}>Voice</Btn>
-          <Btn onClick={() => runBusy("Rendering video…", async () => { await api("/api/v1/content?action=run-job", { body: { type: "RENDER", projectId: p.id } }); await reload(); say("ok", "Render finished."); })}>🎞 Render</Btn>
+          <Btn onClick={() => runBusy("Rendering video…", async () => { const d = await api("/api/v1/content?action=run-job", { body: { type: "RENDER", projectId: p.id } }); const job = d.job as AnyRec; await reload(); const status = str(job?.status); say(status === "done" ? "ok" : status === "queued" || status === "running" ? "ok" : "err", status === "failed" ? `Render failed: ${str(job?.error, "unknown render error")}` : status === "queued" ? "Render queued: waiting for the external render worker." : status === "running" ? "Render is running." : "Render finished."); })}>🎞 Render</Btn>
           <Btn tone="bg-green-700" onClick={() => runBusy("Quality gate…", async () => { const d = await api("/api/v1/content?action=run-job", { body: { type: "QUALITY", projectId: p.id } }); await reload(); say("ok", `Gate: ${JSON.stringify((d.job as AnyRec)?.result).slice(0, 300)}`); })}>Quality gate</Btn>
         </div>
         {latest && (
@@ -542,6 +542,7 @@ function ProjectView({ data, say, runBusy, busy, reload }: TabProps & { data: An
               {str(latest.outputPath) && <a className="text-blue-400 underline" href={mediaUrl(str(latest.outputPath))} target="_blank" rel="noreferrer">⬇ MP4</a>}
               {str(latest.previewHtml) && <a className="text-blue-400 underline" href={str(latest.previewHtml)} target="_blank" rel="noreferrer">▶ Timed preview</a>}
             </div>
+            {str(latest.log) && <details className="mt-2 text-xs"><summary className="cursor-pointer text-slate-300">Technical render log</summary><pre className="mt-1 whitespace-pre-wrap text-red-300">{str(latest.log)}</pre></details>}
             {str(latest.outputPath).endsWith(".mp4") && <video className="mt-2 w-full max-w-lg rounded-lg" controls src={mediaUrl(str(latest.outputPath))} />}
           </div>
         )}

@@ -2,8 +2,9 @@
 // job runner, autonomous pipeline, cost tracking.
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync, readdirSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync, readdirSync, unlinkSync, mkdtempSync, rmSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { tmpdir } from "node:os";
 import { db } from "@/db";
 import * as s from "@/db/schema";
 import { eq, desc, and, sql, gte } from "drizzle-orm";
@@ -314,7 +315,7 @@ export async function ytUploadVideo(channelUuid: string, uploadId: string): Prom
   const renderFile = await materializeMediaPath(render.outputPath);
   const fileBuf = readFileSync(renderFile.path);
   renderFile.cleanup();
-  const snippet: Record<string, unknown> = {
+    const snippet: Record<string, unknown> = {
     title: (meta?.title || proj.title).slice(0, 100),
     description: (meta?.description || proj.title).slice(0, 5000),
     tags: meta?.tags ?? [],
@@ -411,6 +412,27 @@ export function ffmpegAvailable(): boolean {
   } catch { return false; }
 }
 
+function executablePath(name: "ffmpeg" | "ffprobe"): string | null {
+  try {
+    const lookup = process.platform === "win32" ? "where.exe" : "which";
+    const found = spawnSync(lookup, [name], { timeout: 5000, encoding: "utf8" });
+    const path = found.status === 0 ? found.stdout?.split(/\r?\n/).find(Boolean)?.trim() : "";
+    return path || null;
+  } catch { return null; }
+}
+
+export function mediaCapabilityStatus() {
+  const ffmpeg = executablePath("ffmpeg");
+  const ffprobe = executablePath("ffprobe");
+  const version = (name: "ffmpeg" | "ffprobe") => {
+    try {
+      const result = spawnSync(name, ["-version"], { timeout: 5000, encoding: "utf8" });
+      return result.status === 0 ? (result.stdout?.split(/\r?\n/)[0] ?? "") : "";
+    } catch { return ""; }
+  };
+  return { ffmpegAvailable: Boolean(ffmpeg), ffprobeAvailable: Boolean(ffprobe), ffmpegPath: ffmpeg, ffprobePath: ffprobe, ffmpegVersion: version("ffmpeg"), ffprobeVersion: version("ffprobe") };
+}
+
 export function ffprobeAvailable(): boolean {
   try {
     const r = spawnSync("ffprobe", ["-version"], { timeout: 5000 });
@@ -418,16 +440,21 @@ export function ffprobeAvailable(): boolean {
   } catch { return false; }
 }
 
+function probeMedia(absPath: string): { duration: number; streams: string[]; width: number; height: number } {
+  if (!ffprobeAvailable() || !existsSync(absPath)) throw new Error("Render failed: FFprobe input unavailable");
+  const r = spawnSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration", "-of", "json", absPath], { timeout: 10000, encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`Render failed: ffprobe exited with code ${r.status ?? "unknown"}`);
+  try {
+    const data = JSON.parse(r.stdout ?? "") as { streams?: { codec_type?: string; width?: number; height?: number }[]; format?: { duration?: string } };
+    return { duration: Number(data.format?.duration ?? 0), streams: (data.streams ?? []).map((stream) => stream.codec_type ?? ""), width: data.streams?.find((stream) => stream.codec_type === "video")?.width ?? 0, height: data.streams?.find((stream) => stream.codec_type === "video")?.height ?? 0 };
+  } catch { throw new Error("Render failed: ffprobe returned invalid media metadata"); }
+}
+
 function validMp4(absPath: string, requireAudio = true): boolean {
   if (!ffprobeAvailable() || !existsSync(absPath)) return false;
   try {
-    const r = spawnSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type:format=duration", "-of", "default=nw=1:nk=1", absPath], { timeout: 10000, encoding: "utf8" });
-    if (r.status !== 0 || !r.stdout?.trim()) return false;
-    const lines = r.stdout.trim().split(/\r?\n/).map((line) => line.trim());
-    const duration = Number(lines.find((line) => /^\d+(\.\d+)?$/.test(line)) ?? "0");
-    const video = lines.includes("video");
-    const audio = lines.includes("audio");
-    return duration > 0 && video && (!requireAudio || audio);
+    const media = probeMedia(absPath);
+    return media.duration > 0 && media.streams.includes("video") && (!requireAudio || media.streams.includes("audio"));
   } catch { return false; }
 }
 
@@ -448,18 +475,28 @@ export async function renderVideo(projectId: string, edl: {
   resolution: string; aspectRatio: string; clips: { start: number; end: number; caption: string; textOverlay: string; asset?: string; kenburns?: string }[]; captions?: { enabled: boolean };
 }, audioFiles: string[], jobLog: (m: string) => Promise<void> | void): Promise<RenderResult> {
   ensureDirs();
+  const capabilities = mediaCapabilityStatus();
+  await jobLog(`Media capability: ffmpeg=${capabilities.ffmpegPath ?? "unavailable"}; ffprobe=${capabilities.ffprobePath ?? "unavailable"}`);
+  if (!capabilities.ffmpegPath) throw new Error("Render failed: FFmpeg executable unavailable");
+  if (!capabilities.ffprobePath) throw new Error("Render failed: FFprobe executable unavailable");
+  if (!Array.isArray(edl.clips) || edl.clips.length === 0) throw new Error("Render failed: storyboard/EDL has no scenes");
+  if (edl.clips.some((clip) => !Number.isFinite(clip.start) || !Number.isFinite(clip.end) || clip.start < 0 || clip.end <= clip.start)) throw new Error("Render failed: invalid EDL duration");
+  if (audioFiles.some((audio) => !audio)) throw new Error("Render failed: narration audio path is empty");
   const projectRows = await db.select().from(s.videoProjects).where(eq(s.videoProjects.id, projectId)).limit(1);
   const nicheRows = projectRows[0] ? await db.select().from(s.niches).where(eq(s.niches.id, projectRows[0].nicheId)).limit(1) : [];
   const snapshot = projectRows[0]?.creatorIdentity as Partial<CreatorIdentity> | null;
   const identity = snapshot?.creatorName ? mergeCreatorIdentity(snapshot) : (nicheRows[0] ? await getCreatorIdentity(nicheRows[0].channelId) : mergeCreatorIdentity());
   const creditText = [identity?.creatorName && `Created by ${identity.creatorName}`, identity?.brandName && `Produced with ${identity.brandName}`, identity?.aiAttribution, identity?.copyrightLine].filter(Boolean).join("\\n");
-  const clips = creditText ? [...edl.clips, { start: edl.clips.length ? edl.clips[edl.clips.length - 1].end : 0, end: (edl.clips.length ? edl.clips[edl.clips.length - 1].end : 0) + 4, caption: "", textOverlay: creditText }] : edl.clips;
+  const clips = creditText && edl.clips.length > 0
+    ? [...edl.clips, { ...edl.clips[edl.clips.length - 1], start: edl.clips[edl.clips.length - 1].end, end: edl.clips[edl.clips.length - 1].end + 4, caption: "", textOverlay: creditText }]
+    : edl.clips;
   const totalDur = clips.length ? clips[clips.length - 1].end : 10;
   const [W, H] = (edl.resolution || "1920x1080").split("x").map(Number);
   const w = W || 1920, h = H || 1080;
+  const tempDir = mkdtempSync(join(tmpdir(), `vk-youtube-ai-${projectId}-`));
   const stamp = Date.now();
   const outName = `video/${projectId}-${stamp}.mp4`;
-  const outAbs = join(GEN_DIR, outName);
+  const outAbs = join(tempDir, `${projectId}-${stamp}.mp4`);
   const previewName = `video/${projectId}-${stamp}.html`;
   const previewAbs = join(GEN_DIR, previewName);
 
@@ -467,25 +504,28 @@ export async function renderVideo(projectId: string, edl: {
   const previewHtml = buildPreviewHtml(projectId, { ...edl, clips }, totalDur, w, h);
   writeFileSync(previewAbs, previewHtml);
 
-  if (!ffmpegAvailable()) {
-    await jobLog("FFmpeg binary not found — HTML timed preview generated; MP4 pending FFmpeg install.");
-    return { outputPath: "", previewPath: publicUrl(previewAbs), log: "ffmpeg-missing: preview only", durationSec: totalDur, fileSize: 0, renderer: "html-preview" };
-  }
-
-  // Build real MP4 from scene assets when available, with a color fallback only for missing assets.
-  const colors = ["0x0f172a", "0x1e1b4b", "0x052e16", "0x18181b", "0x111827"];
+  // Every scene must use a real materialized generated asset. Missing assets are a prerequisite failure.
   const filterParts: string[] = [];
   const inputs: string[] = [];
-  const assetFiles = await Promise.all(clips.map(async (clip) => {
+  let assetFiles: { path: string; cleanup: () => void }[] = [];
+  let audioFilesResolved: { path: string; cleanup: () => void }[] = [];
+  const cleanup = () => {
+    assetFiles.forEach((file) => file.cleanup());
+    audioFilesResolved.forEach((file) => file.cleanup());
+    rmSync(tempDir, { recursive: true, force: true });
+  };
+  try {
+  assetFiles = await Promise.all(clips.map(async (clip) => {
     if (!clip.asset || /^https?:\/\//i.test(clip.asset)) return { path: "", cleanup: () => undefined };
-    try { return await materializeMediaPath(clip.asset); } catch { return { path: "", cleanup: () => undefined }; }
+    try { return await materializeMediaPath(clip.asset); } catch { throw new Error(`Render failed: input asset missing: ${clip.asset}`); }
   }));
   clips.forEach((c, i) => {
     const dur = Math.max(0.5, c.end - c.start);
     const assetPath = assetFiles[i].path;
-    if (assetPath && existsSync(assetPath)) inputs.push("-loop", "1", "-i", assetPath);
-    else inputs.push("-f", "lavfi", "-i", `color=c=${colors[i % colors.length]}:s=${w}x${h}:d=${dur}:r=30`);
-    let vf = `zoompan=z='min(zoom+0.0015,1.3)':d=${Math.round(dur * 30)}:s=${w}x${h}:fps=30`;
+    if (!assetPath || !existsSync(assetPath)) throw new Error(`Render failed: input asset missing: scene ${i + 1}`);
+    if (statSync(assetPath).size === 0) throw new Error(`Render failed: input asset is empty: scene ${i + 1}`);
+    inputs.push("-loop", "1", "-t", String(dur), "-i", assetPath);
+    let vf = `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,fps=30,trim=duration=${dur.toFixed(3)},setpts=PTS-STARTPTS`;
     const font = fontPath();
     if (font && c.textOverlay) vf += `,drawtext=fontfile=${font}:text='${escDraw(c.textOverlay)}':fontcolor=white:fontsize=${Math.round(h / 12)}:x=(w-text_w)/2:y=h*0.18:shadowcolor=black:shadowx=3:shadowy=3`;
     if (font && edl.captions?.enabled && c.caption) vf += `,drawtext=fontfile=${font}:text='${escDraw(c.caption)}':fontcolor=yellow:fontsize=${Math.round(h / 22)}:x=(w-text_w)/2:y=h-120:shadowcolor=black:shadowx=2:shadowy=2`;
@@ -493,44 +533,58 @@ export async function renderVideo(projectId: string, edl: {
     filterParts.push(`[${i}:v]${vf}[v${i}]`);
   });
   const concat = clips.map((_, i) => `[v${i}]`).join("") + `concat=n=${clips.length}:v=1:a=0[vout]`;
-  const audioFilesResolved = await Promise.all(audioFiles.map(async (audio) => {
+  audioFilesResolved = await Promise.all(audioFiles.map(async (audio) => {
     if (!audio) return { path: "", cleanup: () => undefined };
-    try { return await materializeMediaPath(audio); } catch { return { path: "", cleanup: () => undefined }; }
+    try { return await materializeMediaPath(audio); } catch { throw new Error(`Render failed: narration audio missing: ${audio}`); }
   }));
   const existingAudio = audioFilesResolved.filter((audio) => Boolean(audio.path));
+  for (const audio of existingAudio) {
+    if (!existsSync(audio.path) || statSync(audio.path).size === 0) throw new Error("Render failed: narration audio is empty");
+    const probe = probeMedia(audio.path);
+    if (probe.duration <= 0 || !probe.streams.includes("audio")) throw new Error("Render failed: narration audio failed ffprobe validation");
+  }
   const audioInputArgs: string[] = [];
   existingAudio.forEach((a) => { audioInputArgs.push("-i", a.path); });
   const audioFilter = existingAudio.length > 1
-    ? `${existingAudio.map((_, i) => `[${clips.length + i}:a]aresample=44100[a${i}]`).join(";")};${existingAudio.map((_, i) => `[a${i}]`).join("")}concat=n=${existingAudio.length}:v=0:a=1[aout]`
-    : "";
-  const filterFull = filterParts.length ? `${filterParts.join(";")};${concat}${audioFilter ? `;${audioFilter}` : ""}` : audioFilter;
-  const args: string[] = [...inputs, ...audioInputArgs, "-filter_complex", filterFull || "nullsrc", "-map", "[vout]"];
+    ? `${existingAudio.map((_, i) => `[${clips.length + i}:a]aresample=44100[a${i}]`).join(";")};${existingAudio.map((_, i) => `[a${i}]`).join("")}concat=n=${existingAudio.length}:v=0:a=1[acat];[acat]loudnorm,apad=whole_dur=${totalDur}[aout]`
+    : existingAudio.length === 1
+      ? `[${clips.length}:a]aresample=44100,loudnorm,apad=whole_dur=${totalDur}[aout]`
+      : "";
+  const filterFull = filterParts.length ? `${filterParts.join(";")};${concat};${audioFilter}` : audioFilter;
+  const args: string[] = [...inputs, ...audioInputArgs];
   if (existingAudio.length > 0) {
-    if (existingAudio.length > 1) args.push("-map", "[aout]", "-af", `silenceremove=start_periods=1:start_duration=0.2:start_threshold=-50dB,loudnorm,apad=whole_dur=${totalDur}`, "-shortest");
-    else args.push("-map", `${clips.length}:a`, "-af", `aresample=44100,silenceremove=start_periods=1:start_duration=0.2:start_threshold=-50dB,loudnorm,apad=whole_dur=${totalDur}`, "-shortest");
+    args.push("-filter_complex", filterFull, "-map", "[vout]", "-map", "[aout]", "-shortest");
   } else {
-    args.push("-f", "lavfi", "-i", `anullsrc=r=44100:cl=stereo:d=${totalDur}`, "-map", `${clips.length}:a`, "-shortest");
+    throw new Error("Render failed: narration audio missing");
   }
-  args.push("-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-y", outAbs);
+  args.push("-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", "-y", outAbs);
+  await jobLog(`FFmpeg inputs: ${inputs.filter((value) => value === "-i").length} media inputs; ${[...assetFiles, ...audioFilesResolved].map((file) => file.path).join(", ")}`);
+  await jobLog(`FFmpeg args: ${args.join(" ")}`);
   await jobLog(`Rendering ${edl.clips.length} clips → ${w}x${h}, ${totalDur.toFixed(1)}s`);
   try {
-    execFileSync("ffmpeg", args, { timeout: 1000 * 60 * 10, stdio: ["ignore", "pipe", "pipe"] });
+    execFileSync(capabilities.ffmpegPath, args, { timeout: 1000 * 60 * 10, stdio: ["ignore", "pipe", "pipe"] });
   } catch (e) {
-    assetFiles.forEach((file) => file.cleanup()); audioFilesResolved.forEach((file) => file.cleanup());
-    const msg = e instanceof Error ? e.message.slice(0, 800) : String(e).slice(0, 800);
+    const err = e as { stderr?: Buffer | string; status?: number; signal?: string };
+    const stderr = String(err.stderr ?? "").trim().slice(-1200);
+    const msg = `FFmpeg exited with code ${err.status ?? "unknown"}${err.signal ? ` (${err.signal})` : ""}${stderr ? `: ${stderr}` : ""}`;
     await jobLog(`FFmpeg failed: ${msg}`);
-    return { outputPath: "", previewPath: publicUrl(previewAbs), log: `ffmpeg-error: ${msg}`, durationSec: totalDur, fileSize: 0, renderer: "html-preview" };
+    throw new Error(`Render failed: ${msg}`);
   }
   const size = existsSync(outAbs) ? statSync(outAbs).size : 0;
   if (!size || !validMp4(outAbs, true)) {
-    assetFiles.forEach((file) => file.cleanup()); audioFilesResolved.forEach((file) => file.cleanup());
-    if (existsSync(outAbs)) unlinkSync(outAbs);
-    await jobLog("FFmpeg output failed ffprobe validation — HTML preview retained; MP4 rejected.");
-    return { outputPath: "", previewPath: publicUrl(previewAbs), log: "ffprobe-invalid", durationSec: totalDur, fileSize: 0, renderer: "html-preview" };
+    await jobLog("FFmpeg output failed ffprobe validation — MP4 rejected.");
+    throw new Error("Render failed: output MP4 failed ffprobe validation");
   }
-  assetFiles.forEach((file) => file.cleanup()); audioFilesResolved.forEach((file) => file.cleanup());
+  const durableOutput = join(GEN_DIR, outName);
+  mkdirSync(dirname(durableOutput), { recursive: true });
+  writeFileSync(durableOutput, readFileSync(outAbs));
+  cleanup();
   await jobLog(`Render complete: ${(size / 1024 / 1024).toFixed(2)} MB`);
-  return { outputPath: publicUrl(outAbs), previewPath: publicUrl(previewAbs), log: "ffmpeg-ok", durationSec: totalDur, fileSize: size, renderer: "ffmpeg" };
+  return { outputPath: publicUrl(durableOutput), previewPath: publicUrl(previewAbs), log: "ffmpeg-ok", durationSec: totalDur, fileSize: size, renderer: "ffmpeg" };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
 }
 
 function buildPreviewHtml(projectId: string, edl: { clips: { start: number; end: number; caption: string; textOverlay: string }[] }, totalDur: number, w: number, h: number): string {
@@ -769,7 +823,7 @@ export const jobHandlers: Record<string, JobHandler> = {
       const stored = await getMediaStorage().put(name, svg);
       await db.insert(s.assets).values({ projectId, kind: "image", fileName: `${projectId}-${i}.svg`, storagePath: stored.publicPath, source: img.name, license: "original", attribution: "AI Studio (original render)", rights: "owned", width: 1280, height: 720, meta: { sceneIndex: i, visualPlan: plan, storage: stored } });
       if (costUsd > 0) await recordCost(projectId, jobId, "image", costUsd, `scene ${i}`);
-      paths.push(publicUrl(join(GEN_DIR, name)));
+      paths.push(stored.publicPath);
     }
     const erows = await db.select().from(s.editDecisionLists).where(eq(s.editDecisionLists.projectId, projectId)).limit(1);
     if (erows[0]) {
@@ -796,13 +850,15 @@ export const jobHandlers: Record<string, JobHandler> = {
       await prog(Math.round((i / list.length) * 90));
       const text = (list[i].narration || "").slice(0, 1500);
       if (!text.trim()) continue;
-      const { audioBase64, durationSec, costUsd } = await voice.synthesize(text, { voice: "narrator", speed: 1 });
-      const name = `audio/${projectId}-scene${i}.wav`;
+      const { audioBase64, mimeType, durationSec, costUsd } = await voice.synthesize(text, { voice: "narrator", speed: 1 });
+      const ext = mimeType === "audio/mpeg" ? "mp3" : mimeType === "audio/ogg" ? "ogg" : "wav";
+      const name = `audio/${projectId}-scene${i}.${ext}`;
       const stored = await getMediaStorage().put(name, Buffer.from(audioBase64, "base64"));
-      await db.insert(s.voices).values({ projectId, scriptId: proj.scriptId, provider: voice.name, voiceName: "narrator", text: text.slice(0, 2000), audioPath: stored.publicPath, durationSec, status: "done" });
+      await db.insert(s.voices).values({ projectId, scriptId: proj.scriptId, sceneId: list[i].id === "full" ? undefined : list[i].id, provider: voice.name, voiceName: "narrator", text: text.slice(0, 2000), audioPath: stored.publicPath, durationSec, status: "done" });
       if (costUsd > 0) await recordCost(projectId, jobId, "voice", costUsd, `scene ${i}`);
       files.push(stored.publicPath);
     }
+    if (files.length === 0) throw new Error("Voice generation failed: no scene narration text was available");
     await prog(100);
     return { clips: files.length, files, provider: voice.name };
   },
@@ -815,6 +871,12 @@ export const jobHandlers: Record<string, JobHandler> = {
     const erows = await db.select().from(s.editDecisionLists).where(eq(s.editDecisionLists.projectId, projectId)).limit(1);
     if (!erows[0]) throw new Error("EDL not found — generate storyboard/EDL first");
     const vrows = await db.select().from(s.voices).where(eq(s.voices.projectId, projectId));
+    if (vrows.length === 0) throw new Error("Render blocked: narration audio has not been generated. Run Voice first.");
+    const arows = await db.select().from(s.assets).where(eq(s.assets.projectId, projectId));
+    if (arows.length === 0) throw new Error("Render blocked: generated assets are missing. Run Assets first.");
+    const seo = (await db.select().from(s.seoMetadata).where(eq(s.seoMetadata.projectId, projectId)).limit(1))[0];
+    const thumb = (await db.select().from(s.thumbnails).where(and(eq(s.thumbnails.projectId, projectId), eq(s.thumbnails.selected, true))).limit(1))[0];
+    if (!seo?.description?.trim() || !thumb?.imagePath) throw new Error("Render blocked: packaging has not completed. Generate titles, thumbnail, and SEO first.");
     const rrows = await db.insert(s.renders).values({ projectId, status: "rendering", progress: 5 }).returning({ id: s.renders.id });
     const renderId = rrows[0].id;
     try {
@@ -1004,31 +1066,41 @@ export async function runQuality(projectId: string, log?: (m: string) => Promise
   const arows = await db.select().from(s.assets).where(eq(s.assets.projectId, projectId));
   const vrows = await db.select().from(s.voices).where(eq(s.voices.projectId, projectId));
   const rrows = await db.select().from(s.renders).where(eq(s.renders.projectId, projectId)).orderBy(desc(s.renders.createdAt)).limit(1);
-  const trows = await db.select().from(s.titleOptions).where(eq(s.titleOptions.projectId, projectId)).orderBy(desc(s.titleOptions.totalScore)).limit(1);
-  const throwss = await db.select().from(s.thumbnails).where(eq(s.thumbnails.projectId, projectId)).limit(1);
+  const trows = await db.select().from(s.titleOptions).where(and(eq(s.titleOptions.projectId, projectId), eq(s.titleOptions.selected, true))).limit(1);
+  const throwss = await db.select().from(s.thumbnails).where(and(eq(s.thumbnails.projectId, projectId), eq(s.thumbnails.selected, true))).limit(1);
   const mrows = await db.select().from(s.seoMetadata).where(eq(s.seoMetadata.projectId, projectId)).limit(1);
+  const thumbnailPath = throwss[0]?.imagePath ?? "";
+  const hasThumbnail = Boolean(thumbnailPath) && await (async () => {
+    try { const file = await materializeMediaPath(thumbnailPath); const valid = statSync(file.path).size > 0; file.cleanup(); return valid; } catch { return false; }
+  })();
   let hasRender = false;
   if (rrows[0]?.status === "done" && rrows[0].outputPath && (rrows[0].fileSize ?? 0) > 0) {
     const renderFile = await materializeMediaPath(rrows[0].outputPath);
-    hasRender = validMp4(renderFile.path, true);
+    try {
+      const media = probeMedia(renderFile.path);
+      const [expectedWidth, expectedHeight] = (proj.resolution ?? "1920x1080").split("x").map(Number);
+      hasRender = validMp4(renderFile.path, true) && media.width === expectedWidth && media.height === expectedHeight && media.duration > 0;
+    } catch { hasRender = false; }
     renderFile.cleanup();
   }
-  const hasAudio = (await Promise.all(vrows.map(async (voice) => {
+  const audioValidity = await Promise.all(vrows.map(async (voice) => {
     if (!voice.audioPath || !voice.text?.trim()) return false;
-    try { const file = await materializeMediaPath(voice.audioPath); const valid = statSync(file.path).size > 44; file.cleanup(); return valid; } catch { return false; }
-  }))).some(Boolean);
+    try { const file = await materializeMediaPath(voice.audioPath); const media = probeMedia(file.path); file.cleanup(); return media.duration > 0 && media.streams.includes("audio"); } catch { return false; }
+  }));
+  const hasAudio = audioValidity.length > 0 && audioValidity.every(Boolean);
   const hasAssets = (await Promise.all(arows.map(async (asset) => {
     if (!asset.storagePath) return false;
     try { const file = await materializeMediaPath(asset.storagePath); const valid = statSync(file.path).size > 0; file.cleanup(); return valid; } catch { return false; }
   }))).every(Boolean);
-  const hasNarration = Boolean(scriptBody.trim()) && (await projectScenes(projectId)).every((scene) => Boolean(scene.narration?.trim()));
+  const projectSceneRows = await projectScenes(projectId);
+  const hasNarration = Boolean(scriptBody.trim()) && projectSceneRows.length > 0 && projectSceneRows.every((scene) => Boolean(scene.narration?.trim()) && vrows.some((voice) => voice.sceneId === scene.id && Boolean(voice.audioPath)));
   const gate = E.runQualityGate({
     facts: facts.map((f) => ({ status: f.status ?? "UNCERTAIN", isCritical: f.isCritical ?? false })),
     originalityVerdict: orig.verdict,
     assets: hasAssets ? arows.map((a) => ({ license: a.license ?? "", rights: a.rights ?? "" })) : [{ license: "unknown", rights: "unknown" }],
     titleRisk: trows[0]?.clickbaitRisk ?? 20,
     hasAudio: hasAudio && hasNarration, hasVideo: hasRender, hasCaptions: hasRender && hasNarration,
-    hasThumbnail: throwss.length > 0, hasMetadata: Boolean(mrows[0]),
+    hasThumbnail, hasMetadata: Boolean(mrows[0]?.description?.trim()),
     scriptBody,
     titlePresent: Boolean(trows[0]?.title?.trim() || proj.title?.trim()),
     descriptionPresent: Boolean(mrows[0]?.description?.trim()),
@@ -1175,14 +1247,14 @@ export async function runAutonomousLoop(nicheId: string, jobId: string, log: (m:
   if (auto?.autoProduction !== false) {
     const srows = await db.select().from(s.scripts).where(eq(s.scripts.ideaId, idea.id)).orderBy(desc(s.scripts.createdAt)).limit(1);
     if (!srows[0]) throw new Error("No script for production");
+    // Build the storyboard before materializing scene-specific assets and narration.
+    await buildStoryboardAndEDL(projectId, srows[0].id);
+    await log("Stage: storyboard + EDL");
+    stages.push("storyboard+edl");
     await runStage("ASSET", { projectId }, "assets");
     await prog(55);
     await runStage("VOICE", { projectId }, "voice");
     await prog(65);
-    // Storyboard + EDL after assets/voice so paths embed
-    await buildStoryboardAndEDL(projectId, srows[0].id);
-    await log("Stage: storyboard + EDL");
-    stages.push("storyboard+edl");
     // Titles / thumbnails / SEO
     await generatePackaging(projectId, idea.title, idea.titleIdeas as string[] ?? [], niche.primaryNiche);
     await log("Stage: titles + thumbnails + SEO");
@@ -1348,9 +1420,9 @@ export async function runE2EPipeline(log: (m: string) => Promise<void>): Promise
     return `phraseSim=${o.phraseSimilarity}`;
   });
   await check("storyboard+edl", async () => {
+    const b = await buildStoryboardAndEDL(projectId, scriptId);
     const jida = await createJob("ASSET", { projectId }); await runJobNow(jida);
     const jidv = await createJob("VOICE", { projectId }); await runJobNow(jidv);
-    const b = await buildStoryboardAndEDL(projectId, scriptId);
     return `${b.scenes} scenes`;
   });
   await check("packaging", async () => {
@@ -1420,7 +1492,10 @@ export async function runFailureDrill(): Promise<{ name: string; handled: boolea
     if (r[0].status === "done") throw new Error("should have failed");
     return `job failed gracefully → status=${r[0].status}, error recorded, no corruption`;
   });
-  await t("render-without-ffmpeg", async () => `ffmpeg=${ffmpegAvailable()} — fallback preview renderer engaged automatically`);
+  await t("render-capabilities", async () => {
+    const capabilities = mediaCapabilityStatus();
+    return `ffmpeg=${capabilities.ffmpegAvailable} ffprobe=${capabilities.ffprobeAvailable}`;
+  });
   await t("quality-block", async () => {
     const g = E.runQualityGate({ facts: [{ status: "CONTRADICTED", isCritical: true }], originalityVerdict: "PASS", assets: [], titleRisk: 10, hasAudio: true, hasVideo: true, hasCaptions: true, hasThumbnail: true, hasMetadata: true, scriptBody: "test" });
     if (g.verdict !== "BLOCKED") throw new Error("gate should block contradicted critical facts");

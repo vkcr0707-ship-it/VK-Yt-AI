@@ -3,7 +3,7 @@
 import { db } from "@/db";
 import * as s from "@/db/schema";
 import { eq, desc, and, gte, inArray } from "drizzle-orm";
-import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, userCanAccessJob, recentJobs, runJobNow, channelHealth, getQuota, runE2EPipeline, runFailureDrill, ffmpegAvailable, ffprobeAvailable, updateMemoryFromAutopsy, getCreatorIdentity } from "@/lib/system";
+import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, userCanAccessJob, recentJobs, runJobNow, channelHealth, getQuota, runE2EPipeline, runFailureDrill, ffmpegAvailable, ffprobeAvailable, mediaCapabilityStatus, updateMemoryFromAutopsy, getCreatorIdentity } from "@/lib/system";
 import { providerOverview } from "@/lib/providers";
 import { buildAutopsy } from "@/lib/engines";
 import { rateLimit, rateLimitResponse } from "@/lib/rate-limit";
@@ -30,7 +30,7 @@ export async function GET(req: Request) {
   const action = url.searchParams.get("action") || "";
   const id = url.searchParams.get("id") || "";
   try {
-    if (action === "providers") return json({ providers: providerOverview(), ffmpeg: ffmpegAvailable(), ffprobe: ffprobeAvailable() });
+    if (action === "providers") return json({ providers: providerOverview(), media: mediaCapabilityStatus(), ffmpeg: ffmpegAvailable(), ffprobe: ffprobeAvailable() });
     const user = await getSessionUser(req);
     if (!user) return json({ error: "Unauthorized" }, 401);
     if (action === "quota") return json({ quota: await getQuota("youtube") });
