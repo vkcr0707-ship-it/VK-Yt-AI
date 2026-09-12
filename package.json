@@ -6,6 +6,7 @@
     "build": "next build",
     "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts",
     "worker": "node --import tsx src/worker.ts",
+    "worker:once": "node --import tsx src/worker.ts",
     "start": "next start",
     "test": "node --import tsx --test tests/**/*.test.ts",
     "lint": "eslint .",

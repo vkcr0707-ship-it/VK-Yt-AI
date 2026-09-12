@@ -9,7 +9,7 @@
 - Storage: production should use the private Backblaze B2 S3-compatible adapter. Objects are materialized into unique temporary worker files, validated, rendered, validated again, and uploaded back to private storage.
 - Storage capability: local filesystem mode is temporary. S3 mode is durable only when all S3 variables are configured and the private bucket is reachable.
 - Scheduling: no external scheduler is currently wired; invoke the autonomous loop through a protected scheduler endpoint or platform cron when enabled.
-- Workers: local jobs run synchronously by default. In production, set `WORKER_MODE=external` in both the web app and the dedicated `Dockerfile.render-worker` service. The web app queues jobs; the worker atomically claims them from the shared PostgreSQL jobs table. No Redis queue is required.
+- Workers: local jobs run synchronously by default. The no-card production mechanism is the finite GitHub Actions worker in `.github/workflows/render-worker.yml`: it runs on demand or every 15 minutes, atomically claims at most one queued job, and exits. Set `WORKER_MODE=external` in the web app. Render's `Dockerfile.render-worker` background worker remains available as optional future paid infrastructure. No Redis queue is required.
 - Recommended host: an OCI Always Free VM, because it can run Docker Compose on a persistent Linux VPS without changing the application architecture.
 
 ## Local development
@@ -26,7 +26,8 @@
 - Start: `npm run start -- -p 3001`
 - Vercel build: `npm run vercel-build` (build only; does not mutate the database)
 - Hosted Compose: `docker compose up -d --build`
-- Rendering worker: `docker compose build render-worker` then `docker compose up -d render-worker`; the image includes FFmpeg and ffprobe. The web and worker containers must share the same production `DATABASE_URL` and private S3 configuration.
+- GitHub Actions worker: configure the required repository secrets, then use `workflow_dispatch` for an immediate run or allow the 15-minute schedule. The runner installs FFmpeg and ffprobe, uses `WORKER_MODE=external` and `WORKER_ONCE=1`, and requires the production `DATABASE_URL` plus private S3 variables. It never starts the Next.js web server and does not require YouTube credentials.
+- Optional container worker: `docker compose build render-worker` then `docker compose up -d render-worker`; the image includes FFmpeg and ffprobe. This is retained for future paid/container infrastructure.
 - Health check: `GET /api/health`
 
 ## Environment variables
@@ -36,7 +37,7 @@
 - App routing: `PORT`, `NEXT_PUBLIC_APP_URL`.
 - Optional protection: `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW_MS` configure the in-process development fallback.
 - Media storage: set `MEDIA_STORAGE_PROVIDER=local` for local development, or `MEDIA_STORAGE_PROVIDER=s3` with `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY` for a private Backblaze B2 S3-compatible bucket. The endpoint must be `https://s3.<region>.backblazeb2.com`; do not guess the region.
-- Production worker: `WORKER_MODE=external`, `WORKER_POLL_MS`, and `WORKER_BATCH_SIZE`; the worker also requires `DATABASE_URL` and the same private S3 variables as the web app.
+- GitHub Actions worker variables: `WORKER_MODE=external`, `WORKER_ONCE=1`, and `MEDIA_STORAGE_PROVIDER=s3`. Configure `DATABASE_URL`, `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY` as GitHub repository or environment secrets. Do not add YouTube credentials to the worker.
 - Keep all credentials in the deployment platform secret store. Never commit `.env` or credential-bearing URLs.
 
 ## Database and migrations

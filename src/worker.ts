@@ -18,20 +18,28 @@ async function claimJob(): Promise<string | null> {
   return null;
 }
 
-async function processOnce(): Promise<boolean> {
+async function processOnce(): Promise<"none" | "done" | "queued" | "failed"> {
   const jobId = await claimJob();
-  if (!jobId) return false;
+  if (!jobId) return "none";
   await runJobNow(jobId, { alreadyClaimed: true });
-  return true;
+  const rows = await db.select({ status: s.jobs.status }).from(s.jobs).where(eq(s.jobs.id, jobId)).limit(1);
+  const status = rows[0]?.status;
+  return status === "failed" ? "failed" : status === "queued" ? "queued" : "done";
 }
 
 async function main() {
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required for the rendering worker");
   if (process.env.WORKER_MODE !== "external") throw new Error("Set WORKER_MODE=external to run the worker process");
+  if (process.env.WORKER_ONCE === "1") {
+    const result = await processOnce();
+    console.log(`Finite worker run: ${result}`);
+    if (result === "failed") process.exitCode = 1;
+    return;
+  }
   console.log("Worker started; polling queued jobs.");
   for (;;) {
     const processed = await processOnce();
-    if (!processed) await new Promise((resolve) => setTimeout(resolve, pollMs));
+    if (processed === "none") await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
 }
 
