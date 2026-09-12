@@ -1,1 +1,11 @@
 ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "status" text DEFAULT 'queued';
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "progress" real DEFAULT 0;
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "payload" jsonb DEFAULT '{}'::jsonb;
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "result" jsonb DEFAULT '{}'::jsonb;
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "logs" jsonb DEFAULT '[]'::jsonb;
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "retry_count" integer DEFAULT 0;
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "max_retries" integer DEFAULT 3;
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "error" text DEFAULT '';
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "started_at" timestamp;
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "finished_at" timestamp;
+ALTER TABLE "jobs" ADD COLUMN IF NOT EXISTS "created_at" timestamp DEFAULT now() NOT NULL;
