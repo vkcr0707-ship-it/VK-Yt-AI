@@ -4,7 +4,7 @@ import { db } from "@/db";
 import * as s from "@/db/schema";
 import { eq, desc, and } from "drizzle-orm";
 import { z } from "zod";
-import { hashPassword, verifyPassword, getSessionUser, userOwnsChannel, userOwnsNiche, userOwnsIdea, userOwnsScript, userOwnsProject, createJob, runJobNow, ensureProjectForIdea, buildStoryboardAndEDL, getMemory } from "@/lib/system";
+import { hashPassword, verifyPassword, getSessionUser, getTokenFromRequest, userOwnsChannel, userOwnsNiche, userOwnsIdea, userOwnsScript, userOwnsProject, userOwnsUpload, createJob, runJobNow, ensureProjectForIdea, buildStoryboardAndEDL, getMemory } from "@/lib/system";
 import { buildNicheProfile, planCalendar, buildStrategy } from "@/lib/engines";
 
 export const runtime = "nodejs";
@@ -130,6 +130,8 @@ export async function POST(req: Request) {
       return res;
     }
     if (action === "logout") {
+      const token = getTokenFromRequest(req);
+      if (token) await db.delete(s.sessions).where(eq(s.sessions.token, token));
       const res = Response.json({ ok: true });
       res.headers.set("Set-Cookie", "ayt_session=; Path=/; HttpOnly; Max-Age=0");
       return res;
@@ -207,7 +209,7 @@ export async function POST(req: Request) {
         const v = (b as Record<string, unknown>)[k];
         if (v) payload[k] = v;
       }
-      if ((b.nicheId && !await userOwnsNiche(user.id, b.nicheId)) || (b.ideaId && !await userOwnsIdea(user.id, b.ideaId)) || (b.scriptId && !await userOwnsScript(user.id, b.scriptId)) || (b.projectId && !await userOwnsProject(user.id, b.projectId))) return json({ error: "Unauthorized" }, 401);
+      if ((b.nicheId && !await userOwnsNiche(user.id, b.nicheId)) || (b.ideaId && !await userOwnsIdea(user.id, b.ideaId)) || (b.scriptId && !await userOwnsScript(user.id, b.scriptId)) || (b.projectId && !await userOwnsProject(user.id, b.projectId)) || (b.uploadId && !await userOwnsUpload(user.id, b.uploadId))) return json({ error: "Unauthorized" }, 401);
       const jobId = await createJob(b.type, payload);
       await runJobNow(jobId);
       const rows = await db.select().from(s.jobs).where(eq(s.jobs.id, jobId)).limit(1);

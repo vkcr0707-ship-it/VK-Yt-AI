@@ -3,7 +3,7 @@
 import { db } from "@/db";
 import * as s from "@/db/schema";
 import { eq, desc, and, gte, inArray } from "drizzle-orm";
-import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, userOwnsIdea, userOwnsScript, recentJobs, createJob, runJobNow, channelHealth, getQuota, runE2EPipeline, runFailureDrill, ffmpegAvailable, updateMemoryFromAutopsy, getCreatorIdentity } from "@/lib/system";
+import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, userCanAccessJob, recentJobs, runJobNow, channelHealth, getQuota, runE2EPipeline, runFailureDrill, ffmpegAvailable, ffprobeAvailable, updateMemoryFromAutopsy, getCreatorIdentity } from "@/lib/system";
 import { providerOverview } from "@/lib/providers";
 import { buildAutopsy } from "@/lib/engines";
 
@@ -17,12 +17,18 @@ async function body<T>(req: Request): Promise<T> {
   try { return (await req.json()) as T; } catch { return {} as T; }
 }
 
+async function visibleJobs(userId: string, jobs: Awaited<ReturnType<typeof recentJobs>>) {
+  const visible = [];
+  for (const job of jobs) if (await userCanAccessJob(userId, job)) visible.push(job);
+  return visible;
+}
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const action = url.searchParams.get("action") || "";
   const id = url.searchParams.get("id") || "";
   try {
-    if (action === "providers") return json({ providers: providerOverview(), ffmpeg: ffmpegAvailable() });
+    if (action === "providers") return json({ providers: providerOverview(), ffmpeg: ffmpegAvailable(), ffprobe: ffprobeAvailable() });
     const user = await getSessionUser(req);
     if (!user) return json({ error: "Unauthorized" }, 401);
     if (action === "quota") return json({ quota: await getQuota("youtube") });
@@ -30,7 +36,8 @@ export async function GET(req: Request) {
     if (action === "dashboard") {
       // id = channelId (optional); aggregate across user channels otherwise
       const chans = await db.select().from(s.channels).where(eq(s.channels.userId, user.id));
-      const channel = id ? chans.find((c) => c.id === id) ?? chans[0] : chans[0];
+      if (id && !chans.some((channelRow) => channelRow.id === id)) return json({ error: "Unauthorized" }, 401);
+      const channel = id ? chans.find((c) => c.id === id) : chans[0];
       if (!channel) return json({ empty: true });
       const niches = await db.select().from(s.niches).where(eq(s.niches.channelId, channel.id));
       const niche = niches[0];
@@ -44,7 +51,7 @@ export async function GET(req: Request) {
       const performances = projectIds.length ? await db.select().from(s.videoPerformances).where(inArray(s.videoPerformances.projectId, projectIds)).limit(10) : [];
       const cal = niche ? await db.select().from(s.contentCalendars).where(and(eq(s.contentCalendars.nicheId, niche.id), gte(s.contentCalendars.scheduledDate, new Date()))).orderBy(s.contentCalendars.scheduledDate).limit(10) : [];
       const health = await channelHealth(channel.id);
-      const jobs = await recentJobs(10);
+      const jobs = await visibleJobs(user.id, await recentJobs(50));
       const pipeline = {
         research: niche ? (await db.select().from(s.researchResults).where(eq(s.researchResults.nicheId, niche.id)).limit(1)).length : 0,
         ideas: ideas.length, scripts: niche ? (await db.select().from(s.scripts).where(eq(s.scripts.nicheId, niche.id)).limit(100)).length : 0,
@@ -56,11 +63,10 @@ export async function GET(req: Request) {
       return json({ channels: chans, channel, niche, opportunities: opps, trends, projects, ideas, strategy: strat, memory: memory[0] ?? null, performances, creatorIdentity, calendar: cal, health, jobs, pipeline });
     }
 
-    if (action === "jobs") return json({ jobs: await recentJobs(50) });
+    if (action === "jobs") return json({ jobs: await visibleJobs(user.id, await recentJobs(50)) });
     if (action === "job") {
       const rows = await db.select().from(s.jobs).where(eq(s.jobs.id, id)).limit(1);
-      const payload = (rows[0]?.payload ?? {}) as Record<string, unknown>;
-      if (rows[0] && ((payload.nicheId && !await userOwnsNiche(user.id, String(payload.nicheId))) || (payload.ideaId && !await userOwnsIdea(user.id, String(payload.ideaId))) || (payload.scriptId && !await userOwnsScript(user.id, String(payload.scriptId))) || (payload.projectId && !await userOwnsProject(user.id, String(payload.projectId))))) return json({ error: "Unauthorized" }, 401);
+      if (rows[0] && !await userCanAccessJob(user.id, rows[0])) return json({ error: "Unauthorized" }, 401);
       return json({ job: rows[0] ?? null });
     }
     if (action === "analytics") {
@@ -97,11 +103,13 @@ export async function POST(req: Request) {
     const user = await getSessionUser(req);
     if (!user) return json({ error: "Unauthorized" }, 401);
     if (action === "e2e") {
+      if (process.env.NODE_ENV === "production") return json({ error: "E2E data test is disabled in production" }, 403);
       const logs: string[] = [];
       const result = await runE2EPipeline(async (m) => { logs.push(m); });
       return json({ ...result, logs });
     }
     if (action === "failure-drill") {
+      if (process.env.NODE_ENV === "production") return json({ error: "Failure drill is disabled in production" }, 403);
       const result = await runFailureDrill();
       return json({ drills: result });
     }
@@ -109,8 +117,7 @@ export async function POST(req: Request) {
       const b = await body<{ jobId: string }>(req);
       const rows = await db.select().from(s.jobs).where(eq(s.jobs.id, b.jobId)).limit(1);
       if (!rows[0]) return json({ error: "Job not found" }, 404);
-      const payload = (rows[0].payload ?? {}) as Record<string, unknown>;
-      if ((payload.nicheId && !await userOwnsNiche(user.id, String(payload.nicheId))) || (payload.ideaId && !await userOwnsIdea(user.id, String(payload.ideaId))) || (payload.scriptId && !await userOwnsScript(user.id, String(payload.scriptId))) || (payload.projectId && !await userOwnsProject(user.id, String(payload.projectId)))) return json({ error: "Unauthorized" }, 401);
+      if (!await userCanAccessJob(user.id, rows[0])) return json({ error: "Unauthorized" }, 401);
       await db.update(s.jobs).set({ status: "queued", error: "" }).where(eq(s.jobs.id, b.jobId));
       await runJobNow(b.jobId);
       const updated = await db.select().from(s.jobs).where(eq(s.jobs.id, b.jobId)).limit(1);

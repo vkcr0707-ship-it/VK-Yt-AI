@@ -1,8 +1,8 @@
 // System layer: auth, storage, YouTube Data API + OAuth + upload, FFmpeg renderer,
 // job runner, autonomous pipeline, cost tracking.
-import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { db } from "@/db";
 import * as s from "@/db/schema";
@@ -78,10 +78,44 @@ export async function userOwnsUpload(userId: string, uploadId: string): Promise<
   return Boolean(rows[0] && await userOwnsProject(userId, rows[0].projectId));
 }
 
+export async function userCanAccessJob(userId: string, job: { payload: unknown }): Promise<boolean> {
+  const payload = (job.payload ?? {}) as Record<string, unknown>;
+  if (payload.uploadId) return userOwnsUpload(userId, String(payload.uploadId));
+  if (payload.nicheId) return userOwnsNiche(userId, String(payload.nicheId));
+  if (payload.ideaId) return userOwnsIdea(userId, String(payload.ideaId));
+  if (payload.scriptId) return userOwnsScript(userId, String(payload.scriptId));
+  if (payload.projectId) return userOwnsProject(userId, String(payload.projectId));
+  return false;
+}
+
 function oauthSignature(value: string): string {
   const secret = process.env.SESSION_SECRET;
   if (!secret) throw new Error("SESSION_SECRET is required for YouTube OAuth");
   return createHmac("sha256", secret).update(value).digest("base64url");
+}
+
+const ENCRYPTED_TOKEN_PREFIX = "enc:v1:";
+function tokenKey(): Buffer {
+  const secret = process.env.SESSION_SECRET;
+  if (!secret) throw new Error("SESSION_SECRET is required for token encryption");
+  return createHash("sha256").update(secret).digest();
+}
+
+export function encryptToken(value: string): string {
+  if (!value) return "";
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", tokenKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  return `${ENCRYPTED_TOKEN_PREFIX}${iv.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${encrypted.toString("base64url")}`;
+}
+
+export function decryptToken(value: string): string {
+  if (!value || !value.startsWith(ENCRYPTED_TOKEN_PREFIX)) return value;
+  const parts = value.slice(ENCRYPTED_TOKEN_PREFIX.length).split(".");
+  if (parts.length !== 3) throw new Error("Invalid encrypted token");
+  const decipher = createDecipheriv("aes-256-gcm", tokenKey(), Buffer.from(parts[0], "base64url"));
+  decipher.setAuthTag(Buffer.from(parts[1], "base64url"));
+  return Buffer.concat([decipher.update(Buffer.from(parts[2], "base64url")), decipher.final()]).toString("utf8");
 }
 
 export function oauthState(channelId: string, userId: string): string {
@@ -228,23 +262,35 @@ export async function authenticatedYouTubeChannel(accessToken: string): Promise<
   if (!channel?.id) throw new Error("Authenticated YouTube account has no channel");
   return { id: channel.id, title: channel.snippet?.title ?? "", subscribers: Number(channel.statistics?.subscriberCount ?? 0), views: Number(channel.statistics?.viewCount ?? 0) };
 }
+
+export async function youtubeProcessingStatus(accessToken: string, videoId: string): Promise<{ uploadStatus: string; processingStatus: string }> {
+  const params = new URLSearchParams({ part: "status,processingDetails", id: videoId });
+  const res = await fetch(`${YT}/videos?${params.toString()}`, { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(20000) });
+  if (!res.ok) throw new Error(`YouTube processing lookup failed: ${res.status}`);
+  const data = await res.json() as { items?: { status?: { uploadStatus?: string }; processingDetails?: { processingStatus?: string } }[] };
+  const item = data.items?.[0];
+  if (!item) throw new Error("YouTube video not found during processing lookup");
+  return { uploadStatus: item.status?.uploadStatus ?? "unknown", processingStatus: item.processingDetails?.processingStatus ?? "unknown" };
+}
 export async function refreshAccessToken(channelUuid: string): Promise<string> {
   const rows = await db.select().from(s.youtubeTokens).where(eq(s.youtubeTokens.channelId, channelUuid)).limit(1);
   const tok = rows[0];
   if (!tok?.refreshToken) throw new Error("YouTube not connected for this channel");
-  if (tok.accessToken && tok.expiresAt && new Date(tok.expiresAt).getTime() > Date.now() + 60000) return tok.accessToken;
+  const refreshToken = decryptToken(tok.refreshToken);
+  const accessToken = decryptToken(tok.accessToken ?? "");
+  if (accessToken && tok.expiresAt && new Date(tok.expiresAt).getTime() > Date.now() + 60000) return accessToken;
   const c = oauthConfig();
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ refresh_token: tok.refreshToken, client_id: c.clientId, client_secret: c.clientSecret, grant_type: "refresh_token" }).toString(),
+    body: new URLSearchParams({ refresh_token: refreshToken, client_id: c.clientId, client_secret: c.clientSecret, grant_type: "refresh_token" }).toString(),
   });
   if (!res.ok) throw new Error(`Token refresh failed: ${res.status}`);
   const data = await res.json() as { access_token: string; expires_in: number };
-  await db.update(s.youtubeTokens).set({ accessToken: data.access_token, expiresAt: new Date(Date.now() + data.expires_in * 1000) }).where(eq(s.youtubeTokens.id, tok.id));
+  await db.update(s.youtubeTokens).set({ accessToken: encryptToken(data.access_token), refreshToken: encryptToken(refreshToken), expiresAt: new Date(Date.now() + data.expires_in * 1000) }).where(eq(s.youtubeTokens.id, tok.id));
   return data.access_token;
 }
 
-export async function ytUploadVideo(channelUuid: string, uploadId: string): Promise<{ videoId: string; url: string }> {
+export async function ytUploadVideo(channelUuid: string, uploadId: string): Promise<{ videoId: string; url: string; processingStatus: string }> {
   const urows = await db.select().from(s.uploads).where(eq(s.uploads.id, uploadId)).limit(1);
   const up = urows[0];
   if (!up) throw new Error("Upload not found");
@@ -278,27 +324,49 @@ export async function ytUploadVideo(channelUuid: string, uploadId: string): Prom
   const sessionUri = init.headers.get("location");
   if (!sessionUri) throw new Error("No resumable session URI returned");
   await db.update(s.uploads).set({ status: "uploading", progress: 10, stateJson: { sessionUri }, attemptCount: (up.attemptCount ?? 0) + 1 }).where(eq(s.uploads.id, up.id));
-  // Upload bytes (single PUT; chunked resume supported via stateJson on retry)
-  const put = await fetch(sessionUri, { method: "PUT", headers: { "Content-Type": "video/mp4", "Content-Length": String(fileBuf.length) }, body: new Uint8Array(fileBuf) });
-  if (!put.ok) {
-    const t = (await put.text()).slice(0, 500);
-    await db.update(s.uploads).set({ status: "failed", lastError: `Upload bytes failed: ${put.status} ${t}` }).where(eq(s.uploads.id, up.id));
-    throw new Error(`Upload failed: ${put.status}`);
+  const chunkSize = 8 * 1024 * 1024;
+  let offset = 0;
+  let data: { id: string } | null = null;
+  while (offset < fileBuf.length) {
+    const end = Math.min(offset + chunkSize, fileBuf.length) - 1;
+    const chunk = fileBuf.subarray(offset, end + 1);
+    const put = await fetch(sessionUri, {
+      method: "PUT",
+      headers: { "Content-Type": "video/mp4", "Content-Length": String(chunk.length), "Content-Range": `bytes ${offset}-${end}/${fileBuf.length}` },
+      body: new Uint8Array(chunk),
+    });
+    if (put.status === 308) {
+      const range = put.headers.get("range")?.match(/bytes=0-(\d+)/);
+      offset = range ? Number(range[1]) + 1 : end + 1;
+      await db.update(s.uploads).set({ progress: Math.min(99, 10 + Math.round((offset / fileBuf.length) * 85)), stateJson: { sessionUri, offset } }).where(eq(s.uploads.id, up.id));
+      continue;
+    }
+    if (!put.ok) {
+      const t = (await put.text()).slice(0, 500);
+      await db.update(s.uploads).set({ status: "failed", lastError: `Upload bytes failed: ${put.status} ${t}` }).where(eq(s.uploads.id, up.id));
+      throw new Error(`Upload failed: ${put.status}`);
+    }
+    data = await put.json() as { id: string };
+    offset = end + 1;
   }
-  const data = await put.json() as { id: string };
-  await db.update(s.uploads).set({ status: "uploaded", progress: 100, youtubeVideoId: data.id, uploadUrl: `https://youtu.be/${data.id}`, stateJson: { sessionUri } }).where(eq(s.uploads.id, up.id));
+  if (!data?.id) throw new Error("YouTube upload returned no video ID");
+  let processing = { uploadStatus: "unknown", processingStatus: "unknown" };
+  try { processing = await youtubeProcessingStatus(accessToken, data.id); } catch { /* status can be checked again later */ }
+  const uploadStatus = processing.processingStatus === "failed" || processing.uploadStatus === "failed" ? "failed" : processing.processingStatus === "succeeded" ? "processed" : "processing";
+  await db.update(s.uploads).set({ status: uploadStatus, progress: 100, youtubeVideoId: data.id, uploadUrl: `https://youtu.be/${data.id}`, stateJson: { sessionUri, processing } }).where(eq(s.uploads.id, up.id));
   // Thumbnail
   try {
     const trows = await db.select().from(s.thumbnails).where(and(eq(s.thumbnails.projectId, proj.id), eq(s.thumbnails.selected, true))).limit(1);
     const thumb = trows[0] ?? (await db.select().from(s.thumbnails).where(eq(s.thumbnails.projectId, proj.id)).orderBy(desc(s.thumbnails.totalScore)).limit(1))[0];
-    if (thumb?.imagePath && existsSync(join(process.cwd(), "public", thumb.imagePath.replace(/^\//, "")))) {
+    const thumbExt = thumb?.imagePath?.toLowerCase().split(".").pop() ?? "";
+    if (thumb?.imagePath && ["png", "jpg", "jpeg"].includes(thumbExt) && existsSync(join(process.cwd(), "public", thumb.imagePath.replace(/^\//, "")))) {
       const img = readFileSync(join(process.cwd(), "public", thumb.imagePath.replace(/^\//, "")));
       await fetch(`https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${data.id}`, {
-        method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "image/png" }, body: new Uint8Array(img),
+        method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": thumbExt === "png" ? "image/png" : "image/jpeg" }, body: new Uint8Array(img),
       });
     }
   } catch { /* thumbnail best-effort */ }
-  return { videoId: data.id, url: `https://youtu.be/${data.id}` };
+  return { videoId: data.id, url: `https://youtu.be/${data.id}`, processingStatus: processing.processingStatus };
 }
 
 export async function ytAnalytics(channelUuid: string, videoId: string): Promise<Record<string, number | string> | null> {
@@ -321,6 +389,21 @@ export function ffmpegAvailable(): boolean {
   try {
     const r = spawnSync("ffmpeg", ["-version"], { timeout: 5000 });
     return r.status === 0;
+  } catch { return false; }
+}
+
+export function ffprobeAvailable(): boolean {
+  try {
+    const r = spawnSync("ffprobe", ["-version"], { timeout: 5000 });
+    return r.status === 0;
+  } catch { return false; }
+}
+
+function validMp4(absPath: string): boolean {
+  if (!ffprobeAvailable() || !existsSync(absPath)) return false;
+  try {
+    const r = spawnSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", absPath], { timeout: 10000, encoding: "utf8" });
+    return r.status === 0 && Boolean(r.stdout?.trim());
   } catch { return false; }
 }
 
@@ -406,6 +489,11 @@ export async function renderVideo(projectId: string, edl: {
     return { outputPath: "", previewPath: publicUrl(previewAbs), log: `ffmpeg-error: ${msg}`, durationSec: totalDur, fileSize: 0, renderer: "html-preview" };
   }
   const size = existsSync(outAbs) ? statSync(outAbs).size : 0;
+  if (!size || !validMp4(outAbs)) {
+    if (existsSync(outAbs)) unlinkSync(outAbs);
+    await jobLog("FFmpeg output failed ffprobe validation — HTML preview retained; MP4 rejected.");
+    return { outputPath: "", previewPath: publicUrl(previewAbs), log: "ffprobe-invalid", durationSec: totalDur, fileSize: 0, renderer: "html-preview" };
+  }
   await jobLog(`Render complete: ${(size / 1024 / 1024).toFixed(2)} MB`);
   return { outputPath: publicUrl(outAbs), previewPath: publicUrl(previewAbs), log: "ffmpeg-ok", durationSec: totalDur, fileSize: size, renderer: "ffmpeg" };
 }

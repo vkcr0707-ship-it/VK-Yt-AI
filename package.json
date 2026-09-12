@@ -3,12 +3,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "drizzle-kit push --config=drizzle.config.ts && next build",
+    "build": "next build",
+    "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts",
     "start": "next start",
     "test": "node --import tsx --test tests/**/*.test.ts",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "vercel-build": "npm run build"
+    "vercel-build": "next build"
   },
   "dependencies": {
     "dotenv": "17.3.1",

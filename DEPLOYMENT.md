@@ -13,16 +13,16 @@
 ## Local development
 1. Copy `.env.example` to `.env` and provide a real `DATABASE_URL`.
 2. Run `npm install`.
-3. Apply the schema with `npx drizzle-kit push --config=drizzle.config.ts`.
+3. Apply committed additive migrations with `npm run db:migrate`.
 4. Run `npm run dev` or use `npm run build` followed by `npm run start -- -p 3001`.
 
 ## Build and start
 - Install: `npm install`
 - Typecheck: `npm run typecheck`
 - Lint: `npm run lint`
-- Build: `npm run build` (synchronizes Drizzle schema, then builds)
+- Build: `npm run build` (build only; does not mutate the database)
 - Start: `npm run start -- -p 3001`
-- Vercel build: `npm run vercel-build` (synchronizes Drizzle schema, then builds)
+- Vercel build: `npm run vercel-build` (build only; does not mutate the database)
 - Hosted Compose: `docker compose up -d --build`
 - Health check: `GET /api/health`
 
@@ -35,8 +35,8 @@
 
 ## Database and migrations
 - Use the managed production PostgreSQL URL in the deployment secret store.
-- Apply `drizzle/0000_tense_the_renegades.sql` through the deployment migration step, or run `npx drizzle-kit push --config=drizzle.config.ts` against a newly provisioned database.
-- Both build commands run `drizzle-kit push` against the deployment `DATABASE_URL` before `next build`; this prevents a Vercel build-command override from skipping schema synchronization.
+- Apply committed migrations with `npm run db:migrate` against the intended database, reviewing the SQL first. Do not use `drizzle-kit push` against production.
+- Node startup applies committed Drizzle migrations through `src/instrumentation.ts`; build commands remain read-only so Vercel builds cannot mutate production schema.
 - Verify `/api/health` and a real authenticated read/write operation after migration.
 - Do not delete existing data to resolve schema drift.
 
@@ -62,7 +62,7 @@
 ## OCI Always Free deployment
 - Create an Ubuntu or Oracle Linux Always Free VM, install Docker Engine and the Compose plugin, and allow TCP `80`/`443` in the VM firewall and OCI security list.
 - Clone `https://github.com/vkcr0707-ship-it/VK-Yt-AI.git` on the VM and create `.env` from `.env.example` using secret storage or protected file permissions.
-- Run `npx drizzle-kit push --config=drizzle.config.ts` from a one-off migration container or local admin shell against the intended Neon database; review changes first and never delete existing data.
+- Run `npm run db:migrate` from a one-off migration container or local admin shell against the intended Neon database; review changes first and never delete existing data.
 - Run `docker compose up -d --build`; the app container includes FFmpeg and the Compose file includes Redis with persistent volumes.
 - Put Caddy or Nginx in front for HTTPS, then set `NEXT_PUBLIC_APP_URL` and `YOUTUBE_REDIRECT_URI` to the final HTTPS hostname.
 - OCI signup may require identity and card/debit verification even when using Always Free resources; no deployment can be created until that human account action is complete.

@@ -24,8 +24,12 @@ test("timed scenes preserve renderer-ready visual plans", () => {
 
 test("OAuth state is signed, user-bound, and rejects tampering", async () => {
   process.env.SESSION_SECRET = "test-session-secret";
-  const { oauthState, verifyOAuthState } = await import("../src/lib/system");
+  const { oauthState, verifyOAuthState, encryptToken, decryptToken } = await import("../src/lib/system");
   const state = oauthState("channel-1", "user-1");
   assert.deepEqual(verifyOAuthState(state), { channelId: "channel-1", userId: "user-1" });
   assert.equal(verifyOAuthState(`${state}tampered`), null);
+  const encrypted = encryptToken("refresh-token-value");
+  assert.notEqual(encrypted, "refresh-token-value");
+  assert.equal(decryptToken(encrypted), "refresh-token-value");
+  assert.equal(decryptToken("legacy-token-value"), "legacy-token-value");
 });

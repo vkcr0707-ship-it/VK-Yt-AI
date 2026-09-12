@@ -2,8 +2,8 @@
 // thumbnails, titles, SEO, quality gates, uploads + YouTube OAuth, files, costs.
 import { db } from "@/db";
 import * as s from "@/db/schema";
-import { eq, desc, and } from "drizzle-orm";
-import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, projectScenes, generatePackaging, oauthConfigured, oauthUrl, verifyOAuthState, exchangeCode, authenticatedYouTubeChannel, runQuality, projectCost, listGenFiles, ensureDirs } from "@/lib/system";
+import { eq, desc, and, inArray, or } from "drizzle-orm";
+import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, projectScenes, generatePackaging, oauthConfigured, oauthUrl, verifyOAuthState, exchangeCode, authenticatedYouTubeChannel, encryptToken, runQuality, projectCost, listGenFiles, ensureDirs } from "@/lib/system";
 import { writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { GEN_DIR } from "@/lib/system";
@@ -16,6 +16,34 @@ function json(data: unknown, status = 200) {
 }
 async function body<T>(req: Request): Promise<T> {
   try { return (await req.json()) as T; } catch { return {} as T; }
+}
+
+function decodeUploadedFile(fileName: string, dataBase64: string): { data: Buffer; kind: "image" | "audio" | "video" } | null {
+  const safeBase64 = dataBase64.replace(/^data:[^;]+;base64,/, "").replace(/\s/g, "");
+  if (!safeBase64 || safeBase64.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(safeBase64)) return null;
+  const data = Buffer.from(safeBase64, "base64");
+  if (data.length === 0 || data.length > 10 * 1024 * 1024) return null;
+  const ext = fileName.toLowerCase().split(".").pop() ?? "";
+  const isPng = data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  const isJpeg = data.length >= 3 && data.subarray(0, 3).equals(Buffer.from([255, 216, 255]));
+  const isGif = data.length >= 6 && (data.subarray(0, 6).toString() === "GIF87a" || data.subarray(0, 6).toString() === "GIF89a");
+  const isWebp = data.length >= 12 && data.subarray(0, 4).toString() === "RIFF" && data.subarray(8, 12).toString() === "WEBP";
+  const isSvg = data.subarray(0, 512).toString("utf8").trimStart().startsWith("<svg");
+  const isWav = data.length >= 12 && data.subarray(0, 4).toString() === "RIFF" && data.subarray(8, 12).toString() === "WAVE";
+  const isMp3 = data.subarray(0, 3).toString() === "ID3" || (data.length >= 2 && data[0] === 0xff && (data[1] & 0xe0) === 0xe0);
+  const isOgg = data.subarray(0, 4).toString() === "OggS";
+  const isWebm = data.length >= 4 && data.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
+  const isMp4 = data.length >= 12 && data.subarray(4, 8).toString() === "ftyp";
+  if (["png", "jpg", "jpeg"].includes(ext) && (isPng || isJpeg)) return { data, kind: "image" };
+  if (ext === "gif" && isGif) return { data, kind: "image" };
+  if (ext === "webp" && isWebp) return { data, kind: "image" };
+  if (ext === "svg" && isSvg) return { data, kind: "image" };
+  if (ext === "wav" && isWav) return { data, kind: "audio" };
+  if (ext === "mp3" && isMp3) return { data, kind: "audio" };
+  if (ext === "ogg" && isOgg) return { data, kind: "audio" };
+  if (["mp4", "mov"].includes(ext) && isMp4) return { data, kind: "video" };
+  if (ext === "webm" && isWebm) return { data, kind: "video" };
+  return null;
 }
 
 export async function GET(req: Request) {
@@ -39,9 +67,9 @@ export async function GET(req: Request) {
       const ytChannel = await authenticatedYouTubeChannel(tok.access_token);
       const existing = await db.select().from(s.youtubeTokens).where(eq(s.youtubeTokens.channelId, stateData.channelId)).limit(1);
       if (existing[0]) {
-        await db.update(s.youtubeTokens).set({ accessToken: tok.access_token, ...(tok.refresh_token ? { refreshToken: tok.refresh_token } : {}), expiresAt: new Date(Date.now() + tok.expires_in * 1000), scope: tok.scope }).where(eq(s.youtubeTokens.id, existing[0].id));
+        await db.update(s.youtubeTokens).set({ accessToken: encryptToken(tok.access_token), ...(tok.refresh_token ? { refreshToken: encryptToken(tok.refresh_token) } : {}), expiresAt: new Date(Date.now() + tok.expires_in * 1000), scope: tok.scope }).where(eq(s.youtubeTokens.id, existing[0].id));
       } else {
-        await db.insert(s.youtubeTokens).values({ channelId: stateData.channelId, accessToken: tok.access_token, refreshToken: tok.refresh_token ?? "", expiresAt: new Date(Date.now() + tok.expires_in * 1000), scope: tok.scope });
+        await db.insert(s.youtubeTokens).values({ channelId: stateData.channelId, accessToken: encryptToken(tok.access_token), refreshToken: encryptToken(tok.refresh_token ?? ""), expiresAt: new Date(Date.now() + tok.expires_in * 1000), scope: tok.scope });
       }
       await db.update(s.channels).set({ youtubeChannelId: ytChannel.id, channelUrl: `https://www.youtube.com/channel/${ytChannel.id}` }).where(eq(s.channels.id, stateData.channelId));
       return Response.redirect(new URL("/?tab=publish&oauth=ok", req.url));
@@ -89,7 +117,18 @@ export async function GET(req: Request) {
       return json({ url: oauthUrl(id, user.id) });
     }
     if (action === "files") {
-      return json({ files: listGenFiles() });
+      const user = await getSessionUser(req);
+      if (!user) return json({ error: "Unauthorized" }, 401);
+      const niches = await db.select({ id: s.niches.id }).from(s.niches).innerJoin(s.channels, eq(s.channels.id, s.niches.channelId)).where(eq(s.channels.userId, user.id));
+      const nicheIds = niches.map((niche) => niche.id);
+      if (nicheIds.length === 0) return json({ files: [] });
+      const projects = await db.select({ id: s.videoProjects.id }).from(s.videoProjects).where(inArray(s.videoProjects.nicheId, nicheIds));
+      const projectIds = projects.map((project) => project.id);
+      const assets = await db.select({ storagePath: s.assets.storagePath }).from(s.assets).where(or(inArray(s.assets.nicheId, nicheIds), ...(projectIds.length ? [inArray(s.assets.projectId, projectIds)] : [])));
+      const ownedPaths = new Set(assets.map((asset) => asset.storagePath).filter(Boolean));
+      const ownedIds = [...nicheIds, ...projectIds];
+      const files = listGenFiles().filter((file) => ownedPaths.has(file) || ownedIds.some((ownedId) => file.includes(ownedId)));
+      return json({ files });
     }
     return json({ error: `Unknown action: ${action}` }, 400);
   } catch (e) {
@@ -116,6 +155,8 @@ export async function POST(req: Request) {
     if (action === "select-title") {
       const b = await body<{ projectId: string; titleId: string }>(req);
       if (!await userOwnsProject(user.id, b.projectId)) return json({ error: "Unauthorized" }, 401);
+      const title = (await db.select({ id: s.titleOptions.id }).from(s.titleOptions).where(and(eq(s.titleOptions.id, b.titleId), eq(s.titleOptions.projectId, b.projectId))).limit(1))[0];
+      if (!title) return json({ error: "Title not found" }, 404);
       await db.update(s.titleOptions).set({ selected: false }).where(eq(s.titleOptions.projectId, b.projectId));
       await db.update(s.titleOptions).set({ selected: true }).where(eq(s.titleOptions.id, b.titleId));
       const t = await db.select().from(s.titleOptions).where(eq(s.titleOptions.id, b.titleId)).limit(1);
@@ -129,6 +170,8 @@ export async function POST(req: Request) {
     if (action === "select-thumbnail") {
       const b = await body<{ projectId: string; thumbId: string }>(req);
       if (!await userOwnsProject(user.id, b.projectId)) return json({ error: "Unauthorized" }, 401);
+      const thumb = (await db.select({ id: s.thumbnails.id }).from(s.thumbnails).where(and(eq(s.thumbnails.id, b.thumbId), eq(s.thumbnails.projectId, b.projectId))).limit(1))[0];
+      if (!thumb) return json({ error: "Thumbnail not found" }, 404);
       await db.update(s.thumbnails).set({ selected: false }).where(eq(s.thumbnails.projectId, b.projectId));
       await db.update(s.thumbnails).set({ selected: true }).where(eq(s.thumbnails.id, b.thumbId));
       return json({ ok: true });
@@ -147,10 +190,10 @@ export async function POST(req: Request) {
     if (action === "prepare-upload") {
       const b = await body<{ projectId: string; privacy?: string; scheduledAt?: string; playlistId?: string }>(req);
       if (!await userOwnsProject(user.id, b.projectId)) return json({ error: "Unauthorized" }, 401);
+      if (b.privacy && !["private", "unlisted", "public", "scheduled"].includes(b.privacy)) return json({ error: "Invalid privacy setting" }, 400);
       const q = await runQuality(b.projectId);
       if (q.verdict !== "PASS") {
-        const override = (b as Record<string, unknown>).overrideGates === true;
-        if (!override) return json({ error: "Quality gate BLOCKED", reasons: q.reasons, gateId: q.gateId }, 409);
+        return json({ error: "Quality gate BLOCKED", reasons: q.reasons, gateId: q.gateId }, 409);
       }
       const existing = await db.select().from(s.uploads).where(and(eq(s.uploads.projectId, b.projectId), eq(s.uploads.status, "prepared"))).limit(1);
       if (existing[0]) return json({ upload: existing[0] });
@@ -164,16 +207,16 @@ export async function POST(req: Request) {
     }
     if (action === "upload-asset") {
       const b = await body<{ projectId?: string; nicheId?: string; fileName: string; dataBase64: string; license?: string; attribution?: string; source?: string }>(req);
-      if ((b.projectId && !await userOwnsProject(user.id, b.projectId)) || (!b.projectId && b.nicheId && !await userOwnsNiche(user.id, b.nicheId))) return json({ error: "Unauthorized" }, 401);
-      if (!b.fileName || !b.dataBase64) return json({ error: "fileName and dataBase64 required" }, 400);
-      if (b.dataBase64.length > 15_000_000) return json({ error: "File too large (max ~10MB)" }, 400);
+      if (!b.fileName || !b.dataBase64 || (!b.projectId && !b.nicheId)) return json({ error: "fileName, dataBase64, and projectId or nicheId are required" }, 400);
+      if ((b.projectId && !await userOwnsProject(user.id, b.projectId)) || (b.nicheId && !await userOwnsNiche(user.id, b.nicheId))) return json({ error: "Unauthorized" }, 401);
+      const uploaded = decodeUploadedFile(b.fileName, b.dataBase64);
+      if (!uploaded) return json({ error: "Unsupported, malformed, or oversized media file" }, 400);
       ensureDirs();
       const safe = b.fileName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
       const name = `img/upload-${Date.now()}-${safe}`;
-      writeFileSync(join(GEN_DIR, name), Buffer.from(b.dataBase64, "base64"));
-      const kind = /\.(mp4|mov|webm)$/i.test(safe) ? "video" : /\.(mp3|wav|ogg)$/i.test(safe) ? "audio" : "image";
+      writeFileSync(join(GEN_DIR, name), uploaded.data);
       const rows = await db.insert(s.assets).values({
-        projectId: b.projectId || undefined, nicheId: b.nicheId || undefined, kind, fileName: safe,
+        projectId: b.projectId || undefined, nicheId: b.nicheId || undefined, kind: uploaded.kind, fileName: safe,
         storagePath: `/gen/${name}`, source: (b.source ?? "user-upload").slice(0, 100),
         license: (b.license ?? "user-provided").slice(0, 100), attribution: (b.attribution ?? "").slice(0, 500), rights: "user-provided",
       }).returning();
