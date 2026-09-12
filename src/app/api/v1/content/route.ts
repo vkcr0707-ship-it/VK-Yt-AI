@@ -16,21 +16,6 @@ function json(data: unknown, status = 200) {
   return Response.json(data, { status });
 }
 function requestKey(req: Request): string { return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "anonymous"; }
-function safeRuntimeError(error: unknown): string {
-  const value = error && typeof error === "object" ? error as Record<string, unknown> : {};
-  return String(value.message ?? error ?? "unknown")
-    .replace(/postgres(?:ql)?:\/\/[^\s]+/gi, "[redacted-database-url]")
-    .replace(/(password_hash|password|token|cookie|api[_-]?key)[^\s,]*/gi, "$1=[redacted]")
-    .replace(/\s+/g, " ")
-    .slice(0, 500);
-}
-function diagnosticErrorResponse(message: string, status: number, operation: string, error: unknown): Response {
-  const response = json({ error: message }, status);
-  response.headers.set("X-Diagnostic-Version", "192b82a");
-  response.headers.set("X-Diagnostic-Operation", operation);
-  response.headers.set("X-Diagnostic-Error", safeRuntimeError(error));
-  return response;
-}
 async function body<T>(req: Request): Promise<T> {
   try { return (await req.json()) as T; } catch { return {} as T; }
 }
@@ -124,56 +109,41 @@ const loginSchema = z.object({ email: z.string().email(), password: z.string().m
 export async function POST(req: Request) {
   const url = new URL(req.url);
   const action = url.searchParams.get("action") || "";
-  let operation = `${action}:entered`;
   try {
     if (action === "signup") {
-      operation = "signup:existing-user-select";
-      console.info("[auth] signup entered", { database: formatDatabaseError({}).split(" code=")[0] });
       const gate = rateLimit(requestKey(req), "signup", { limit: 5, windowMs: 15 * 60_000 });
       if (!gate.allowed) return rateLimitResponse(gate.retryAfterSec);
       const p = signupSchema.safeParse(await body(req));
       if (!p.success) return json({ error: "Invalid signup data", issues: p.error.issues }, 400);
       const existing = await db.select().from(s.users).where(eq(s.users.email, p.data.email)).limit(1);
-      console.info("[auth] signup existing-user select completed", { rows: existing.length });
       if (existing[0]) return json({ error: "Email already registered" }, 409);
-      operation = "signup:user-insert";
       const rows = await db.insert(s.users).values({ email: p.data.email, passwordHash: hashPassword(p.data.password), name: p.data.name }).returning({ id: s.users.id, email: s.users.email, name: s.users.name });
-      console.info("[auth] signup user insert completed", { rows: rows.length });
       const token = randomUUID() + randomUUID();
-      operation = "signup:session-insert";
       await db.insert(s.sessions).values({ userId: rows[0].id, token, expiresAt: new Date(Date.now() + 30 * 86400000) });
-      console.info("[auth] signup session insert completed");
       const res = Response.json({ user: rows[0] });
       res.headers.set("Set-Cookie", `ayt_session=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000`);
       return res;
     }
     if (action === "login") {
-      operation = "login:user-select";
       const gate = rateLimit(requestKey(req), "login", { limit: 10, windowMs: 15 * 60_000 });
       if (!gate.allowed) return rateLimitResponse(gate.retryAfterSec);
       const p = loginSchema.safeParse(await body(req));
       if (!p.success) return json({ error: "Invalid login data" }, 400);
       try {
         const rows = await db.select().from(s.users).where(eq(s.users.email, p.data.email)).limit(1);
-        console.info("[auth] login user select completed", { rows: rows.length });
         if (!rows[0]) return json({ error: "Invalid email or password" }, 401);
-        operation = "login:password-verification";
         const passwordValid = verifyPassword(p.data.password, rows[0].passwordHash);
-        console.info("[auth] login password verification completed", { valid: passwordValid });
         if (!passwordValid) return json({ error: "Invalid email or password" }, 401);
         const token = randomUUID() + randomUUID();
-        operation = "login:session-insert";
         await db.insert(s.sessions).values({ userId: rows[0].id, token, expiresAt: new Date(Date.now() + 30 * 86400000) });
-        console.info("[auth] login session insert completed");
         const res = Response.json({ user: { id: rows[0].id, email: rows[0].email, name: rows[0].name } });
         res.headers.set("Set-Cookie", `ayt_session=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000`);
         return res;
       } catch (error) {
         console.error("[auth] login database error", {
           error: formatDatabaseError(error),
-          runtimeError: safeRuntimeError(error),
         });
-        return diagnosticErrorResponse("Login temporarily unavailable", 503, operation, error);
+        return json({ error: "Login temporarily unavailable" }, 503);
       }
     }
     if (action === "logout") {
@@ -358,8 +328,8 @@ export async function POST(req: Request) {
 
     return json({ error: `Unknown action: ${action}` }, 400);
   } catch (e) {
-    console.error("[content] request error", { operation, error: formatDatabaseError(e), runtimeError: safeRuntimeError(e) });
-    return diagnosticErrorResponse("Request failed", 500, operation, e);
+    console.error("[content] request error", formatDatabaseError(e));
+    return json({ error: "Request failed" }, 500);
   }
 }
 

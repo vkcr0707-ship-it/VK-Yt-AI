@@ -53,7 +53,6 @@ if (!databaseUrl && process.env.NODE_ENV === "production") {
 const globalForDb = globalThis as typeof globalThis & {
   __arenaNextJsPostgresqlPool?: Pool;
 };
-const reusedPool = Boolean(globalForDb.__arenaNextJsPostgresqlPool);
 
 function createPool(): Pool {
   if (databaseUrl) {
@@ -73,11 +72,5 @@ function createPool(): Pool {
 
 export const pool = globalForDb.__arenaNextJsPostgresqlPool ?? createPool();
 globalForDb.__arenaNextJsPostgresqlPool = pool;
-
-console.info("[db] pool initialized", {
-  runtime: process.env.NEXT_RUNTIME ?? "nodejs",
-  reused: reusedPool,
-  ...databaseConnectionMetadata(),
-});
 
 export const db = drizzle(pool);
