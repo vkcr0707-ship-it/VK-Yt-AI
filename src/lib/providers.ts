@@ -3,6 +3,7 @@
 // Cloud providers activate when env credentials exist; otherwise status() reports "not_configured".
 
 export type ProviderStatus = "ready" | "not_configured" | "error";
+import { storageStatus } from "./storage";
 
 export interface LLMProvider {
   name: string;
@@ -275,6 +276,13 @@ export function providerOverview() {
     youtubeOAuth: {
       name: "youtube-oauth", status: oauth as ProviderStatus,
       detail: oauth === "ready" ? "YouTube OAuth client configured." : "Integration not configured — set YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REDIRECT_URI.",
+    },
+    storage: { name: "media-storage", ...storageStatus() },
+    worker: {
+      name: "job-worker",
+      status: process.env.WORKER_MODE === "external" ? "not_configured" : "ready",
+      mode: process.env.WORKER_MODE || "local-sync",
+      detail: process.env.WORKER_MODE === "external" ? "External worker mode requested but no worker adapter is configured." : "Jobs execute synchronously in the current Node process; durable distributed workers are not configured.",
     },
   };
 }

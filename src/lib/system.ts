@@ -9,6 +9,7 @@ import * as s from "@/db/schema";
 import { eq, desc, and, sql, gte } from "drizzle-orm";
 import { getVoice, getImage, WebResearch } from "./providers";
 import * as E from "./engines";
+import { listLocalMedia, localMediaPath, putLocalMedia } from "./storage";
 
 // ─── Paths ───
 export const GEN_DIR = join(process.cwd(), "public", "gen");
@@ -131,7 +132,8 @@ export function verifyOAuthState(state: string): { channelId: string; userId: st
     const a = Buffer.from(signature ?? ""); const b = Buffer.from(expected);
     if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
     const [channelId, userId, issued] = payload.split(".");
-    if (!channelId || !userId || !issued || Date.now() - Number(issued) > 10 * 60 * 1000) return null;
+    const issuedAt = Number(issued);
+    if (!channelId || !userId || !Number.isFinite(issuedAt) || issuedAt > Date.now() + 30_000 || Date.now() - issuedAt > 10 * 60 * 1000) return null;
     return { channelId, userId };
   } catch { return null; }
 }
@@ -294,6 +296,10 @@ export async function ytUploadVideo(channelUuid: string, uploadId: string): Prom
   const urows = await db.select().from(s.uploads).where(eq(s.uploads.id, uploadId)).limit(1);
   const up = urows[0];
   if (!up) throw new Error("Upload not found");
+  if (up.youtubeVideoId) {
+    const processing = (up.stateJson as { processing?: { processingStatus?: string } } | null)?.processing?.processingStatus ?? "unknown";
+    return { videoId: up.youtubeVideoId, url: up.uploadUrl || `https://youtu.be/${up.youtubeVideoId}`, processingStatus: processing };
+  }
   const prows = await db.select().from(s.videoProjects).where(eq(s.videoProjects.id, up.projectId)).limit(1);
   const proj = prows[0];
   if (!proj) throw new Error("Project not found");
@@ -301,11 +307,11 @@ export async function ytUploadVideo(channelUuid: string, uploadId: string): Prom
   const meta = mrows[0];
   const rrows = await db.select().from(s.renders).where(and(eq(s.renders.projectId, proj.id), eq(s.renders.status, "done"))).orderBy(desc(s.renders.createdAt)).limit(1);
   const render = rrows[0];
-  if (!render?.outputPath || !existsSync(join(process.cwd(), "public", render.outputPath.replace(/^\//, "")))) {
+  if (!render?.outputPath || !existsSync(localMediaPath(render.outputPath))) {
     throw new Error("No rendered MP4 available — render the video first");
   }
   const accessToken = await refreshAccessToken(channelUuid);
-  const fileBuf = readFileSync(join(process.cwd(), "public", render.outputPath.replace(/^\//, "")));
+  const fileBuf = readFileSync(localMediaPath(render.outputPath));
   const snippet: Record<string, unknown> = {
     title: (meta?.title || proj.title).slice(0, 100),
     description: (meta?.description || proj.title).slice(0, 5000),
@@ -314,18 +320,21 @@ export async function ytUploadVideo(channelUuid: string, uploadId: string): Prom
   };
   const status: Record<string, unknown> = { privacyStatus: up.privacy === "scheduled" ? "private" : up.privacy || "private" };
   if (up.privacy === "scheduled" && up.scheduledAt) { status.publishAt = new Date(up.scheduledAt).toISOString(); status.privacyStatus = "private"; }
-  // Resumable upload: init
-  const init = await fetch("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", "X-Upload-Content-Length": String(fileBuf.length), "X-Upload-Content-Type": "video/mp4" },
-    body: JSON.stringify({ snippet, status }),
-  });
-  if (!init.ok) throw new Error(`Upload init failed: ${init.status} ${(await init.text()).slice(0, 300)}`);
-  const sessionUri = init.headers.get("location");
-  if (!sessionUri) throw new Error("No resumable session URI returned");
+  const savedState = (up.stateJson ?? {}) as { sessionUri?: string; offset?: number };
+  let sessionUri = savedState.sessionUri;
+  if (!sessionUri) {
+    const init = await fetch("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", "X-Upload-Content-Length": String(fileBuf.length), "X-Upload-Content-Type": "video/mp4" },
+      body: JSON.stringify({ snippet, status }),
+    });
+    if (!init.ok) throw new Error(`Upload init failed: ${init.status} ${(await init.text()).slice(0, 300)}`);
+    sessionUri = init.headers.get("location") ?? undefined;
+    if (!sessionUri) throw new Error("No resumable session URI returned");
+  }
   await db.update(s.uploads).set({ status: "uploading", progress: 10, stateJson: { sessionUri }, attemptCount: (up.attemptCount ?? 0) + 1 }).where(eq(s.uploads.id, up.id));
   const chunkSize = 8 * 1024 * 1024;
-  let offset = 0;
+  let offset = savedState.offset ?? 0;
   let data: { id: string } | null = null;
   while (offset < fileBuf.length) {
     const end = Math.min(offset + chunkSize, fileBuf.length) - 1;
@@ -359,8 +368,8 @@ export async function ytUploadVideo(channelUuid: string, uploadId: string): Prom
     const trows = await db.select().from(s.thumbnails).where(and(eq(s.thumbnails.projectId, proj.id), eq(s.thumbnails.selected, true))).limit(1);
     const thumb = trows[0] ?? (await db.select().from(s.thumbnails).where(eq(s.thumbnails.projectId, proj.id)).orderBy(desc(s.thumbnails.totalScore)).limit(1))[0];
     const thumbExt = thumb?.imagePath?.toLowerCase().split(".").pop() ?? "";
-    if (thumb?.imagePath && ["png", "jpg", "jpeg"].includes(thumbExt) && existsSync(join(process.cwd(), "public", thumb.imagePath.replace(/^\//, "")))) {
-      const img = readFileSync(join(process.cwd(), "public", thumb.imagePath.replace(/^\//, "")));
+    if (thumb?.imagePath && ["png", "jpg", "jpeg"].includes(thumbExt) && existsSync(localMediaPath(thumb.imagePath))) {
+      const img = readFileSync(localMediaPath(thumb.imagePath));
       await fetch(`https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${data.id}`, {
         method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": thumbExt === "png" ? "image/png" : "image/jpeg" }, body: new Uint8Array(img),
       });
@@ -375,12 +384,18 @@ export async function ytAnalytics(channelUuid: string, videoId: string): Promise
     const end = new Date().toISOString().slice(0, 10);
     const start = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
     const p = new URLSearchParams({ ids: "channel==MINE", startDate: start, endDate: end, metrics: "views,likes,comments,shares,estimatedMinutesWatched,averageViewDuration,subscribersGained,impressions,impressionsClickThroughRate", filters: `video==${videoId}` });
-    const res = await fetch(`https://youtubeanalytics.googleapis.com/v2/reports?${p.toString()}`, { headers: { Authorization: `Bearer ${accessToken}` } });
-    if (!res.ok) return null;
-    const data = await res.json() as { rows?: (string | number)[][] };
-    const r = data.rows?.[0];
-    if (!r) return null;
-    return { views: Number(r[0]), likes: Number(r[1]), comments: Number(r[2]), shares: Number(r[3]), watchMin: Number(r[4]), avgDur: Number(r[5]), subs: Number(r[6]), impressions: Number(r[7]), ctr: Number(r[8]) };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await fetch(`https://youtubeanalytics.googleapis.com/v2/reports?${p.toString()}`, { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(20000) });
+      if (res.ok) {
+        const data = await res.json() as { rows?: (string | number)[][] };
+        const r = data.rows?.[0];
+        if (!r) return null;
+        return { views: Number(r[0]), likes: Number(r[1]), comments: Number(r[2]), shares: Number(r[3]), watchMin: Number(r[4]), avgDur: Number(r[5]), subs: Number(r[6]), impressions: Number(r[7]), ctr: Number(r[8]) };
+      }
+      if (res.status < 500 && res.status !== 429) return null;
+      await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+    }
+    return null;
   } catch { return null; }
 }
 
@@ -399,11 +414,16 @@ export function ffprobeAvailable(): boolean {
   } catch { return false; }
 }
 
-function validMp4(absPath: string): boolean {
+function validMp4(absPath: string, requireAudio = true): boolean {
   if (!ffprobeAvailable() || !existsSync(absPath)) return false;
   try {
-    const r = spawnSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", absPath], { timeout: 10000, encoding: "utf8" });
-    return r.status === 0 && Boolean(r.stdout?.trim());
+    const r = spawnSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type:format=duration", "-of", "default=nw=1:nk=1", absPath], { timeout: 10000, encoding: "utf8" });
+    if (r.status !== 0 || !r.stdout?.trim()) return false;
+    const lines = r.stdout.trim().split(/\r?\n/).map((line) => line.trim());
+    const duration = Number(lines.find((line) => /^\d+(\.\d+)?$/.test(line)) ?? "0");
+    const video = lines.includes("video");
+    const audio = lines.includes("audio");
+    return duration > 0 && video && (!requireAudio || audio);
   } catch { return false; }
 }
 
@@ -454,7 +474,8 @@ export async function renderVideo(projectId: string, edl: {
   const inputs: string[] = [];
   clips.forEach((c, i) => {
     const dur = Math.max(0.5, c.end - c.start);
-    const assetPath = c.asset && !/^https?:\/\//i.test(c.asset) ? join(process.cwd(), "public", c.asset.replace(/^\//, "")) : "";
+    let assetPath = "";
+    if (c.asset && !/^https?:\/\//i.test(c.asset)) { try { assetPath = localMediaPath(c.asset); } catch { assetPath = ""; } }
     if (assetPath && existsSync(assetPath)) inputs.push("-loop", "1", "-i", assetPath);
     else inputs.push("-f", "lavfi", "-i", `color=c=${colors[i % colors.length]}:s=${w}x${h}:d=${dur}:r=30`);
     let vf = `zoompan=z='min(zoom+0.0015,1.3)':d=${Math.round(dur * 30)}:s=${w}x${h}:fps=30`;
@@ -465,9 +486,9 @@ export async function renderVideo(projectId: string, edl: {
     filterParts.push(`[${i}:v]${vf}[v${i}]`);
   });
   const concat = clips.map((_, i) => `[v${i}]`).join("") + `concat=n=${clips.length}:v=1:a=0[vout]`;
-  const existingAudio = audioFiles.filter((a) => a && existsSync(join(process.cwd(), "public", a.replace(/^\//, ""))));
+  const existingAudio = audioFiles.filter((a) => { try { return Boolean(a) && existsSync(localMediaPath(a)); } catch { return false; } });
   const audioInputArgs: string[] = [];
-  existingAudio.forEach((a) => { audioInputArgs.push("-i", join(process.cwd(), "public", a.replace(/^\//, ""))); });
+  existingAudio.forEach((a) => { audioInputArgs.push("-i", localMediaPath(a)); });
   const audioFilter = existingAudio.length > 1
     ? `${existingAudio.map((_, i) => `[${clips.length + i}:a]aresample=44100[a${i}]`).join(";")};${existingAudio.map((_, i) => `[a${i}]`).join("")}concat=n=${existingAudio.length}:v=0:a=1[aout]`
     : "";
@@ -489,7 +510,7 @@ export async function renderVideo(projectId: string, edl: {
     return { outputPath: "", previewPath: publicUrl(previewAbs), log: `ffmpeg-error: ${msg}`, durationSec: totalDur, fileSize: 0, renderer: "html-preview" };
   }
   const size = existsSync(outAbs) ? statSync(outAbs).size : 0;
-  if (!size || !validMp4(outAbs)) {
+  if (!size || !validMp4(outAbs, true)) {
     if (existsSync(outAbs)) unlinkSync(outAbs);
     await jobLog("FFmpeg output failed ffprobe validation — HTML preview retained; MP4 rejected.");
     return { outputPath: "", previewPath: publicUrl(previewAbs), log: "ffprobe-invalid", durationSec: totalDur, fileSize: 0, renderer: "html-preview" };
@@ -731,8 +752,8 @@ export const jobHandlers: Record<string, JobHandler> = {
       const prompt = `${proj.title} — ${String(plan.subject ?? scene?.visual ?? "scene")} (${String(plan.archetype ?? "explainer")}); composition: ${String(plan.composition ?? "clear focal subject")}; renderer primitives: ${JSON.stringify(plan.rendererHints ?? {})}`;
       const { svg, costUsd } = await img.generateImage(prompt, { width: 1280, height: 720 });
       const name = `img/${projectId}-${i}.svg`;
-      writeFileSync(join(GEN_DIR, name), svg);
-      await db.insert(s.assets).values({ projectId, kind: "image", fileName: `${projectId}-${i}.svg`, storagePath: publicUrl(join(GEN_DIR, name)), source: img.name, license: "original", attribution: "AI Studio (original render)", rights: "owned", width: 1280, height: 720, meta: { sceneIndex: i, visualPlan: plan } });
+      const stored = putLocalMedia(name, svg);
+      await db.insert(s.assets).values({ projectId, kind: "image", fileName: `${projectId}-${i}.svg`, storagePath: stored.publicPath, source: img.name, license: "original", attribution: "AI Studio (original render)", rights: "owned", width: 1280, height: 720, meta: { sceneIndex: i, visualPlan: plan, storage: stored } });
       if (costUsd > 0) await recordCost(projectId, jobId, "image", costUsd, `scene ${i}`);
       paths.push(publicUrl(join(GEN_DIR, name)));
     }
@@ -763,8 +784,8 @@ export const jobHandlers: Record<string, JobHandler> = {
       if (!text.trim()) continue;
       const { audioBase64, durationSec, costUsd } = await voice.synthesize(text, { voice: "narrator", speed: 1 });
       const name = `audio/${projectId}-scene${i}.wav`;
-      writeFileSync(join(GEN_DIR, name), Buffer.from(audioBase64, "base64"));
-      await db.insert(s.voices).values({ projectId, scriptId: proj.scriptId, provider: voice.name, voiceName: "narrator", text: text.slice(0, 2000), audioPath: publicUrl(join(GEN_DIR, name)), durationSec, status: "done" });
+      const stored = putLocalMedia(name, Buffer.from(audioBase64, "base64"));
+      await db.insert(s.voices).values({ projectId, scriptId: proj.scriptId, provider: voice.name, voiceName: "narrator", text: text.slice(0, 2000), audioPath: stored.publicPath, durationSec, status: "done" });
       if (costUsd > 0) await recordCost(projectId, jobId, "voice", costUsd, `scene ${i}`);
       files.push(publicUrl(join(GEN_DIR, name)));
     }
@@ -812,8 +833,32 @@ export const jobHandlers: Record<string, JobHandler> = {
     if (!oauthConfigured()) throw new Error("YouTube OAuth not configured — set YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET");
     await prog(20);
     const r = await ytUploadVideo(channelId, uploadId);
+    if (r.processingStatus !== "succeeded") await createJob("PROCESSING", { uploadId });
     await prog(100);
     return r;
+  },
+
+  PROCESSING: async (jobId, p, log, prog) => {
+    const uploadId = String(p.uploadId);
+    const urows = await db.select().from(s.uploads).where(eq(s.uploads.id, uploadId)).limit(1);
+    const up = urows[0];
+    if (!up?.youtubeVideoId) throw new Error("Upload has no YouTube video ID");
+    const prows = await db.select().from(s.videoProjects).where(eq(s.videoProjects.id, up.projectId)).limit(1);
+    const nrows = prows[0] ? await db.select().from(s.niches).where(eq(s.niches.id, prows[0].nicheId)).limit(1) : [];
+    if (!nrows[0]) throw new Error("Upload channel not found");
+    const accessToken = await refreshAccessToken(nrows[0].channelId);
+    await prog(20);
+    let processing = await youtubeProcessingStatus(accessToken, up.youtubeVideoId);
+    for (const delayMs of [1000, 3000, 7000]) {
+      if (processing.processingStatus === "succeeded" || processing.processingStatus === "failed" || processing.processingStatus === "terminated") break;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      processing = await youtubeProcessingStatus(accessToken, up.youtubeVideoId);
+    }
+    const status = processing.processingStatus === "failed" || processing.uploadStatus === "failed" || processing.processingStatus === "terminated" ? "failed" : processing.processingStatus === "succeeded" ? "processed" : "processing";
+    await db.update(s.uploads).set({ status, lastError: status === "failed" ? `YouTube processing ${processing.processingStatus}` : "", stateJson: { ...(up.stateJson as Record<string, unknown> ?? {}), processing } }).where(eq(s.uploads.id, up.id));
+    await log(`YouTube processing: ${processing.processingStatus}`);
+    await prog(100);
+    return { uploadId, status, processing };
   },
 
   ANALYTICS: async (jobId, p, log, prog) => {
@@ -861,6 +906,7 @@ export async function runJobNow(jobId: string): Promise<void> {
   const rows = await db.select().from(s.jobs).where(eq(s.jobs.id, jobId)).limit(1);
   const job = rows[0];
   if (!job) throw new Error("Job not found");
+  if (job.status === "done" || job.status === "running") return;
   const handler = jobHandlers[job.type];
   if (!handler) { await updateJob(jobId, { status: "failed", error: `No handler for ${job.type}` }); return; }
   await updateJob(jobId, { status: "running", startedAt: new Date(), error: "" });
@@ -941,16 +987,27 @@ export async function runQuality(projectId: string, log?: (m: string) => Promise
   const trows = await db.select().from(s.titleOptions).where(eq(s.titleOptions.projectId, projectId)).orderBy(desc(s.titleOptions.totalScore)).limit(1);
   const throwss = await db.select().from(s.thumbnails).where(eq(s.thumbnails.projectId, projectId)).limit(1);
   const mrows = await db.select().from(s.seoMetadata).where(eq(s.seoMetadata.projectId, projectId)).limit(1);
-  const renderPath = rrows[0]?.outputPath ? join(process.cwd(), "public", rrows[0].outputPath.replace(/^\//, "")) : "";
-  const hasRender = Boolean(rrows[0]?.status === "done" && renderPath && existsSync(renderPath) && (rrows[0]?.fileSize ?? 0) > 0);
+  const renderPath = rrows[0]?.outputPath ? (() => { try { return localMediaPath(rrows[0].outputPath); } catch { return ""; } })() : "";
+  const hasRender = Boolean(rrows[0]?.status === "done" && renderPath && (rrows[0]?.fileSize ?? 0) > 0 && validMp4(renderPath, true));
+  const hasAudio = vrows.some((voice) => {
+    const path = voice.audioPath ? (() => { try { return localMediaPath(voice.audioPath); } catch { return ""; } })() : "";
+    return Boolean(path && existsSync(path) && statSync(path).size > 44 && voice.text?.trim());
+  });
+  const hasAssets = arows.every((asset) => {
+    const path = asset.storagePath ? (() => { try { return localMediaPath(asset.storagePath); } catch { return ""; } })() : "";
+    return Boolean(path && existsSync(path) && statSync(path).size > 0);
+  });
+  const hasNarration = Boolean(scriptBody.trim()) && (await projectScenes(projectId)).every((scene) => Boolean(scene.narration?.trim()));
   const gate = E.runQualityGate({
     facts: facts.map((f) => ({ status: f.status ?? "UNCERTAIN", isCritical: f.isCritical ?? false })),
     originalityVerdict: orig.verdict,
-    assets: arows.map((a) => ({ license: a.license ?? "", rights: a.rights ?? "" })),
+    assets: hasAssets ? arows.map((a) => ({ license: a.license ?? "", rights: a.rights ?? "" })) : [{ license: "unknown", rights: "unknown" }],
     titleRisk: trows[0]?.clickbaitRisk ?? 20,
-    hasAudio: vrows.length > 0, hasVideo: hasRender, hasCaptions: hasRender,
+    hasAudio: hasAudio && hasNarration, hasVideo: hasRender, hasCaptions: hasRender && hasNarration,
     hasThumbnail: throwss.length > 0, hasMetadata: Boolean(mrows[0]),
     scriptBody,
+    titlePresent: Boolean(trows[0]?.title?.trim() || proj.title?.trim()),
+    descriptionPresent: Boolean(mrows[0]?.description?.trim()),
   });
   const grows = await db.insert(s.qualityGates).values({
     projectId, facts: gate.facts, originality: gate.originality, rights: gate.rights, policyRisk: gate.policyRisk,
@@ -1167,10 +1224,10 @@ export async function generatePackaging(projectId: string, topic: string, seedTi
   for (let i = 0; i < concepts.length; i++) {
     const { svg, costUsd } = await img.generateImage(concepts[i], { width: 1280, height: 720 });
     const name = `thumb/${projectId}-${i}.svg`;
-    writeFileSync(join(GEN_DIR, name), svg);
+    const stored = putLocalMedia(name, svg);
     const text = (best[0]?.title ?? topic).split(" ").slice(0, 4).join(" ");
     const sc = E.scoreThumbnail({ concept: concepts[i], text, niche });
-    await db.insert(s.thumbnails).values({ projectId, concept: concepts[i], imagePath: publicUrl(join(GEN_DIR, name)), svg: svg.slice(0, 20000), ...sc, selected: i === 0 });
+    await db.insert(s.thumbnails).values({ projectId, concept: concepts[i], imagePath: stored.publicPath, svg: svg.slice(0, 20000), ...sc, selected: i === 0 });
     if (costUsd > 0) await recordCost(projectId, null, "image", costUsd, `thumbnail ${i}`);
   }
   // SEO
@@ -1352,15 +1409,7 @@ export async function runFailureDrill(): Promise<{ name: string; handled: boolea
 export { E };
 export function sha1(s: string): string { return createHash("sha1").update(s).digest("hex"); }
 export function listGenFiles(): string[] {
-  try {
-    ensureDirs();
-    const out: string[] = [];
-    for (const sub of ["audio", "img", "video", "thumb"]) {
-      const d = join(GEN_DIR, sub);
-      if (existsSync(d)) for (const f of readdirSync(d)) out.push(`/gen/${sub}/${f}`);
-    }
-    return out.slice(-100);
-  } catch { return []; }
+  try { ensureDirs(); return listLocalMedia(); } catch { return []; }
 }
 export async function channelHealth(channelId: string) {
   const snaps = await db.select().from(s.analyticsSnapshots).where(eq(s.analyticsSnapshots.channelId, channelId)).orderBy(desc(s.analyticsSnapshots.capturedAt)).limit(20);

@@ -33,3 +33,14 @@ test("OAuth state is signed, user-bound, and rejects tampering", async () => {
   assert.equal(decryptToken(encrypted), "refresh-token-value");
   assert.equal(decryptToken("legacy-token-value"), "legacy-token-value");
 });
+
+test("storage keys reject traversal and rate limits return a bounded denial", async () => {
+  const { safeMediaKey, storageStatus } = await import("../src/lib/storage");
+  const { rateLimit } = await import("../src/lib/rate-limit");
+  assert.equal(safeMediaKey("img/example.svg"), "img/example.svg");
+  assert.throws(() => safeMediaKey("../secret.txt"));
+  assert.throws(() => safeMediaKey("img/../../secret.txt"));
+  assert.equal(storageStatus().durable, false);
+  assert.equal(rateLimit("test-key", "test", { limit: 1, windowMs: 60_000 }).allowed, true);
+  assert.equal(rateLimit("test-key", "test", { limit: 1, windowMs: 60_000 }).allowed, false);
+});

@@ -539,6 +539,8 @@ export interface QualityInput {
   hasAudio: boolean; hasVideo: boolean; hasCaptions: boolean;
   hasThumbnail: boolean; hasMetadata: boolean;
   scriptBody: string;
+  titlePresent?: boolean;
+  descriptionPresent?: boolean;
 }
 
 const BANNED = ["guaranteed", "get rich", "cure", "miracle cure", "hate", "kill all"];
@@ -561,6 +563,9 @@ export function runQualityGate(q: QualityInput) {
   const thumbnail = check("Thumbnail", q.hasThumbnail, "No thumbnail selected");
   const title = check("Title", q.titleRisk < 70, q.titleRisk >= 70 ? `Clickbait risk ${q.titleRisk} too high` : undefined);
   const metadata = check("Metadata", q.hasMetadata, "SEO metadata missing");
+  check("Title present", q.titlePresent !== false, "Title is empty");
+  check("Description present", q.descriptionPresent !== false, "Description is empty");
+  check("Script narration", q.scriptBody.trim().length > 0, "Script is empty");
   const verdict = reasons.length === 0 ? "PASS" : "BLOCKED";
   return { facts, originality, rights, policyRisk, audio, video, captions, thumbnail, title, metadata, verdict, reasons };
 }

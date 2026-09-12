@@ -7,7 +7,9 @@
 - Redis: not used by the current source tree and therefore not required.
 - Rendering: FFmpeg must be installed in the runtime for MP4 output. Without it, the application produces an honest timed HTML preview.
 - Storage: generated assets are written under `public/gen`; use persistent/object storage before scaling beyond a single instance.
+- Storage capability: local filesystem mode is reported as temporary. A durable adapter is intentionally disabled until a compatible object-storage integration is configured; the app never claims local media is durable.
 - Scheduling: no external scheduler is currently wired; invoke the autonomous loop through a protected scheduler endpoint or platform cron when enabled.
+- Workers: current jobs run in local synchronous mode. `WORKER_MODE=external` reports an unavailable worker adapter rather than pretending a distributed queue exists.
 - Recommended host: an OCI Always Free VM, because it can run Docker Compose on a persistent Linux VPS without changing the application architecture.
 
 ## Local development
@@ -31,6 +33,8 @@
 - Optional live providers: `LLM_API_KEY`, `TTS_API_KEY`, `IMAGE_API_KEY`, `TAVILY_API_KEY` or `WEB_SEARCH_API_KEY`, `YOUTUBE_API_KEY`.
 - YouTube OAuth: `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REDIRECT_URI`.
 - App routing: `PORT`, `NEXT_PUBLIC_APP_URL`.
+- Optional protection: `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW_MS` configure the in-process development fallback.
+- Optional media capability markers: `MEDIA_STORAGE_ENDPOINT`, `MEDIA_STORAGE_TOKEN`, and `WORKER_MODE` are recognized but do not enable an adapter by themselves.
 - Keep all credentials in the deployment platform secret store. Never commit `.env` or credential-bearing URLs.
 
 ## Database and migrations

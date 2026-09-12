@@ -6,6 +6,7 @@ import { eq, desc, and, gte, inArray } from "drizzle-orm";
 import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, userCanAccessJob, recentJobs, runJobNow, channelHealth, getQuota, runE2EPipeline, runFailureDrill, ffmpegAvailable, ffprobeAvailable, updateMemoryFromAutopsy, getCreatorIdentity } from "@/lib/system";
 import { providerOverview } from "@/lib/providers";
 import { buildAutopsy } from "@/lib/engines";
+import { rateLimit, rateLimitResponse } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -114,6 +115,8 @@ export async function POST(req: Request) {
       return json({ drills: result });
     }
     if (action === "retry-job") {
+      const gate = rateLimit(user.id, "retry-job", { limit: 10, windowMs: 60_000 });
+      if (!gate.allowed) return rateLimitResponse(gate.retryAfterSec);
       const b = await body<{ jobId: string }>(req);
       const rows = await db.select().from(s.jobs).where(eq(s.jobs.id, b.jobId)).limit(1);
       if (!rows[0]) return json({ error: "Job not found" }, 404);

@@ -4,9 +4,8 @@ import { db } from "@/db";
 import * as s from "@/db/schema";
 import { eq, desc, and, inArray, or } from "drizzle-orm";
 import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, projectScenes, generatePackaging, oauthConfigured, oauthUrl, verifyOAuthState, exchangeCode, authenticatedYouTubeChannel, encryptToken, runQuality, projectCost, listGenFiles, ensureDirs } from "@/lib/system";
-import { writeFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import { GEN_DIR } from "@/lib/system";
+import { rateLimit, rateLimitResponse } from "@/lib/rate-limit";
+import { putLocalMedia } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -113,6 +112,8 @@ export async function GET(req: Request) {
     if (action === "oauth-url") {
       const user = await getSessionUser(req);
       if (!user || !await userOwnsChannel(user.id, id)) return json({ error: "Unauthorized" }, 401);
+      const gate = rateLimit(user.id, "oauth-url", { limit: 5, windowMs: 10 * 60_000 });
+      if (!gate.allowed) return rateLimitResponse(gate.retryAfterSec);
       if (!oauthConfigured()) return json({ error: "Integration not configured — set YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REDIRECT_URI" }, 400);
       return json({ url: oauthUrl(id, user.id) });
     }
@@ -190,6 +191,8 @@ export async function POST(req: Request) {
     if (action === "prepare-upload") {
       const b = await body<{ projectId: string; privacy?: string; scheduledAt?: string; playlistId?: string }>(req);
       if (!await userOwnsProject(user.id, b.projectId)) return json({ error: "Unauthorized" }, 401);
+      const gate = rateLimit(user.id, "prepare-upload", { limit: 10, windowMs: 60_000 });
+      if (!gate.allowed) return rateLimitResponse(gate.retryAfterSec);
       if (b.privacy && !["private", "unlisted", "public", "scheduled"].includes(b.privacy)) return json({ error: "Invalid privacy setting" }, 400);
       const q = await runQuality(b.projectId);
       if (q.verdict !== "PASS") {
@@ -209,16 +212,19 @@ export async function POST(req: Request) {
       const b = await body<{ projectId?: string; nicheId?: string; fileName: string; dataBase64: string; license?: string; attribution?: string; source?: string }>(req);
       if (!b.fileName || !b.dataBase64 || (!b.projectId && !b.nicheId)) return json({ error: "fileName, dataBase64, and projectId or nicheId are required" }, 400);
       if ((b.projectId && !await userOwnsProject(user.id, b.projectId)) || (b.nicheId && !await userOwnsNiche(user.id, b.nicheId))) return json({ error: "Unauthorized" }, 401);
+      const gate = rateLimit(user.id, "upload-asset", { limit: 10, windowMs: 60_000 });
+      if (!gate.allowed) return rateLimitResponse(gate.retryAfterSec);
       const uploaded = decodeUploadedFile(b.fileName, b.dataBase64);
       if (!uploaded) return json({ error: "Unsupported, malformed, or oversized media file" }, 400);
       ensureDirs();
       const safe = b.fileName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
       const name = `img/upload-${Date.now()}-${safe}`;
-      writeFileSync(join(GEN_DIR, name), uploaded.data);
+      const stored = putLocalMedia(name, uploaded.data);
       const rows = await db.insert(s.assets).values({
         projectId: b.projectId || undefined, nicheId: b.nicheId || undefined, kind: uploaded.kind, fileName: safe,
-        storagePath: `/gen/${name}`, source: (b.source ?? "user-upload").slice(0, 100),
+        storagePath: stored.publicPath, source: (b.source ?? "user-upload").slice(0, 100),
         license: (b.license ?? "user-provided").slice(0, 100), attribution: (b.attribution ?? "").slice(0, 500), rights: "user-provided",
+        meta: { storage: stored },
       }).returning();
       return json({ asset: rows[0] });
     }

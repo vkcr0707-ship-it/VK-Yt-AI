@@ -6,6 +6,7 @@ import { eq, desc, and } from "drizzle-orm";
 import { z } from "zod";
 import { hashPassword, verifyPassword, getSessionUser, getTokenFromRequest, userOwnsChannel, userOwnsNiche, userOwnsIdea, userOwnsScript, userOwnsProject, userOwnsUpload, createJob, runJobNow, ensureProjectForIdea, buildStoryboardAndEDL, getMemory } from "@/lib/system";
 import { buildNicheProfile, planCalendar, buildStrategy } from "@/lib/engines";
+import { rateLimit, rateLimitResponse } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,6 +14,7 @@ export const dynamic = "force-dynamic";
 function json(data: unknown, status = 200) {
   return Response.json(data, { status });
 }
+function requestKey(req: Request): string { return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "anonymous"; }
 async function body<T>(req: Request): Promise<T> {
   try { return (await req.json()) as T; } catch { return {} as T; }
 }
@@ -107,6 +109,8 @@ export async function POST(req: Request) {
   const action = url.searchParams.get("action") || "";
   try {
     if (action === "signup") {
+      const gate = rateLimit(requestKey(req), "signup", { limit: 5, windowMs: 15 * 60_000 });
+      if (!gate.allowed) return rateLimitResponse(gate.retryAfterSec);
       const p = signupSchema.safeParse(await body(req));
       if (!p.success) return json({ error: "Invalid signup data", issues: p.error.issues }, 400);
       const existing = await db.select().from(s.users).where(eq(s.users.email, p.data.email)).limit(1);
@@ -119,6 +123,8 @@ export async function POST(req: Request) {
       return res;
     }
     if (action === "login") {
+      const gate = rateLimit(requestKey(req), "login", { limit: 10, windowMs: 15 * 60_000 });
+      if (!gate.allowed) return rateLimitResponse(gate.retryAfterSec);
       const p = loginSchema.safeParse(await body(req));
       if (!p.success) return json({ error: "Invalid login data" }, 400);
       const rows = await db.select().from(s.users).where(eq(s.users.email, p.data.email)).limit(1);
@@ -201,8 +207,10 @@ export async function POST(req: Request) {
     }
 
     if (action === "run-job") {
+      const gate = rateLimit(user.id, "run-job", { limit: 20, windowMs: 60_000 });
+      if (!gate.allowed) return rateLimitResponse(gate.retryAfterSec);
       const b = await body<{ type: string; nicheId?: string; ideaId?: string; scriptId?: string; projectId?: string; uploadId?: string; maxVideos?: number }>(req);
-      const allowed = ["RESEARCH", "TREND", "IDEA", "SCRIPT", "FACT_CHECK", "ASSET", "VOICE", "RENDER", "QUALITY", "UPLOAD", "ANALYTICS", "AUTONOMOUS"];
+      const allowed = ["RESEARCH", "TREND", "IDEA", "SCRIPT", "FACT_CHECK", "ASSET", "VOICE", "RENDER", "QUALITY", "UPLOAD", "PROCESSING", "ANALYTICS", "AUTONOMOUS"];
       if (!allowed.includes(b.type)) return json({ error: "Unknown job type" }, 400);
       const payload: Record<string, unknown> = {};
       for (const k of ["nicheId", "ideaId", "scriptId", "projectId", "uploadId", "maxVideos"] as const) {
