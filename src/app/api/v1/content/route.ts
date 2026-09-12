@@ -105,6 +105,12 @@ export async function GET(req: Request) {
 // ─── POST ───
 const signupSchema = z.object({ email: z.string().email(), password: z.string().min(6), name: z.string().min(1).max(80) });
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
+const AUTH_BUILD = "auth-marker-1";
+
+function authResponse(response: Response): Response {
+  response.headers.set("X-AUTH-BUILD", AUTH_BUILD);
+  return response;
+}
 
 export async function POST(req: Request) {
   const url = new URL(req.url);
@@ -128,22 +134,22 @@ export async function POST(req: Request) {
       const gate = rateLimit(requestKey(req), "login", { limit: 10, windowMs: 15 * 60_000 });
       if (!gate.allowed) return rateLimitResponse(gate.retryAfterSec);
       const p = loginSchema.safeParse(await body(req));
-      if (!p.success) return json({ error: "Invalid login data" }, 400);
+      if (!p.success) return authResponse(json({ error: "Invalid login data" }, 400));
       try {
         const rows = await db.select().from(s.users).where(eq(s.users.email, p.data.email)).limit(1);
-        if (!rows[0]) return json({ error: "Invalid email or password" }, 401);
+        if (!rows[0]) return authResponse(json({ error: "Invalid email or password" }, 401));
         const passwordValid = verifyPassword(p.data.password, rows[0].passwordHash);
-        if (!passwordValid) return json({ error: "Invalid email or password" }, 401);
+        if (!passwordValid) return authResponse(json({ error: "Invalid email or password" }, 401));
         const token = randomUUID() + randomUUID();
         await db.insert(s.sessions).values({ userId: rows[0].id, token, expiresAt: new Date(Date.now() + 30 * 86400000) });
         const res = Response.json({ user: { id: rows[0].id, email: rows[0].email, name: rows[0].name } });
         res.headers.set("Set-Cookie", `ayt_session=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000`);
-        return res;
+        return authResponse(res);
       } catch (error) {
         console.error("[auth] login database error", {
           error: formatDatabaseError(error),
         });
-        return json({ error: "Login temporarily unavailable" }, 503);
+        return authResponse(json({ error: "Login temporarily unavailable" }, 503));
       }
     }
     if (action === "logout") {
