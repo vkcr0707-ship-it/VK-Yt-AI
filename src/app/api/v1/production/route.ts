@@ -5,7 +5,7 @@ import * as s from "@/db/schema";
 import { eq, desc, and, inArray, or } from "drizzle-orm";
 import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, projectScenes, generatePackaging, oauthConfigured, oauthUrl, verifyOAuthState, exchangeCode, authenticatedYouTubeChannel, encryptToken, runQuality, projectCost, listGenFiles, ensureDirs } from "@/lib/system";
 import { rateLimit, rateLimitResponse } from "@/lib/rate-limit";
-import { putLocalMedia } from "@/lib/storage";
+import { getMediaStorage, mediaMimeType, storageKeyFromPath } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -131,6 +131,30 @@ export async function GET(req: Request) {
       const files = listGenFiles().filter((file) => ownedPaths.has(file) || ownedIds.some((ownedId) => file.includes(ownedId)));
       return json({ files });
     }
+    if (action === "media") {
+      const user = await getSessionUser(req);
+      const key = url.searchParams.get("key") || "";
+      if (!user || !key) return json({ error: "Unauthorized" }, 401);
+      const ownedAsset = (await db.select({ projectId: s.assets.projectId, nicheId: s.assets.nicheId }).from(s.assets).where(eq(s.assets.storagePath, key)).limit(1))[0];
+      let allowed = Boolean(ownedAsset && ((ownedAsset.projectId && await userOwnsProject(user.id, ownedAsset.projectId)) || (ownedAsset.nicheId && await userOwnsNiche(user.id, ownedAsset.nicheId))));
+      if (!allowed) {
+        const renderRows = await db.select({ nicheId: s.videoProjects.nicheId }).from(s.renders).innerJoin(s.videoProjects, eq(s.renders.projectId, s.videoProjects.id)).where(eq(s.renders.outputPath, key)).limit(1);
+        const thumbRows = await db.select({ nicheId: s.videoProjects.nicheId }).from(s.thumbnails).innerJoin(s.videoProjects, eq(s.thumbnails.projectId, s.videoProjects.id)).where(eq(s.thumbnails.imagePath, key)).limit(1);
+        const project = renderRows[0] ?? thumbRows[0];
+        allowed = Boolean(project?.nicheId && await userOwnsNiche(user.id, project.nicheId));
+      }
+      if (!allowed) {
+        const voiceRows = await db.select({ projectId: s.voices.projectId }).from(s.voices).where(eq(s.voices.audioPath, key)).limit(1);
+        allowed = Boolean(voiceRows[0]?.projectId && await userOwnsProject(user.id, voiceRows[0].projectId));
+      }
+      if (!allowed) return json({ error: "Unauthorized" }, 401);
+      try {
+        const data = await getMediaStorage().read(storageKeyFromPath(key));
+        const body = new Uint8Array(data.byteLength);
+        body.set(data);
+        return new Response(body, { headers: { "Content-Type": mediaMimeType(key), "Cache-Control": "private, max-age=60" } });
+      } catch { return json({ error: "Media not found" }, 404); }
+    }
     return json({ error: `Unknown action: ${action}` }, 400);
   } catch (e) {
     return json({ error: e instanceof Error ? e.message : "failed" }, 500);
@@ -219,7 +243,7 @@ export async function POST(req: Request) {
       ensureDirs();
       const safe = b.fileName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
       const name = `img/upload-${Date.now()}-${safe}`;
-      const stored = putLocalMedia(name, uploaded.data);
+      const stored = await getMediaStorage().put(name, uploaded.data);
       const rows = await db.insert(s.assets).values({
         projectId: b.projectId || undefined, nicheId: b.nicheId || undefined, kind: uploaded.kind, fileName: safe,
         storagePath: stored.publicPath, source: (b.source ?? "user-upload").slice(0, 100),

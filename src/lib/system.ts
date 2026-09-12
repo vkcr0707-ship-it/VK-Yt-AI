@@ -9,7 +9,7 @@ import * as s from "@/db/schema";
 import { eq, desc, and, sql, gte } from "drizzle-orm";
 import { getVoice, getImage, WebResearch } from "./providers";
 import * as E from "./engines";
-import { listLocalMedia, localMediaPath, putLocalMedia } from "./storage";
+import { getMediaStorage, listLocalMedia, localMediaPath, materializeMediaPath } from "./storage";
 
 // ─── Paths ───
 export const GEN_DIR = join(process.cwd(), "public", "gen");
@@ -307,11 +307,13 @@ export async function ytUploadVideo(channelUuid: string, uploadId: string): Prom
   const meta = mrows[0];
   const rrows = await db.select().from(s.renders).where(and(eq(s.renders.projectId, proj.id), eq(s.renders.status, "done"))).orderBy(desc(s.renders.createdAt)).limit(1);
   const render = rrows[0];
-  if (!render?.outputPath || !existsSync(localMediaPath(render.outputPath))) {
+  if (!render?.outputPath) {
     throw new Error("No rendered MP4 available — render the video first");
   }
   const accessToken = await refreshAccessToken(channelUuid);
-  const fileBuf = readFileSync(localMediaPath(render.outputPath));
+  const renderFile = await materializeMediaPath(render.outputPath);
+  const fileBuf = readFileSync(renderFile.path);
+  renderFile.cleanup();
   const snippet: Record<string, unknown> = {
     title: (meta?.title || proj.title).slice(0, 100),
     description: (meta?.description || proj.title).slice(0, 5000),
@@ -368,8 +370,10 @@ export async function ytUploadVideo(channelUuid: string, uploadId: string): Prom
     const trows = await db.select().from(s.thumbnails).where(and(eq(s.thumbnails.projectId, proj.id), eq(s.thumbnails.selected, true))).limit(1);
     const thumb = trows[0] ?? (await db.select().from(s.thumbnails).where(eq(s.thumbnails.projectId, proj.id)).orderBy(desc(s.thumbnails.totalScore)).limit(1))[0];
     const thumbExt = thumb?.imagePath?.toLowerCase().split(".").pop() ?? "";
-    if (thumb?.imagePath && ["png", "jpg", "jpeg"].includes(thumbExt) && existsSync(localMediaPath(thumb.imagePath))) {
-      const img = readFileSync(localMediaPath(thumb.imagePath));
+    if (thumb?.imagePath && ["png", "jpg", "jpeg"].includes(thumbExt)) {
+      const thumbFile = await materializeMediaPath(thumb.imagePath);
+      const img = readFileSync(thumbFile.path);
+      thumbFile.cleanup();
       await fetch(`https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${data.id}`, {
         method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": thumbExt === "png" ? "image/png" : "image/jpeg" }, body: new Uint8Array(img),
       });
@@ -472,10 +476,13 @@ export async function renderVideo(projectId: string, edl: {
   const colors = ["0x0f172a", "0x1e1b4b", "0x052e16", "0x18181b", "0x111827"];
   const filterParts: string[] = [];
   const inputs: string[] = [];
+  const assetFiles = await Promise.all(clips.map(async (clip) => {
+    if (!clip.asset || /^https?:\/\//i.test(clip.asset)) return { path: "", cleanup: () => undefined };
+    try { return await materializeMediaPath(clip.asset); } catch { return { path: "", cleanup: () => undefined }; }
+  }));
   clips.forEach((c, i) => {
     const dur = Math.max(0.5, c.end - c.start);
-    let assetPath = "";
-    if (c.asset && !/^https?:\/\//i.test(c.asset)) { try { assetPath = localMediaPath(c.asset); } catch { assetPath = ""; } }
+    const assetPath = assetFiles[i].path;
     if (assetPath && existsSync(assetPath)) inputs.push("-loop", "1", "-i", assetPath);
     else inputs.push("-f", "lavfi", "-i", `color=c=${colors[i % colors.length]}:s=${w}x${h}:d=${dur}:r=30`);
     let vf = `zoompan=z='min(zoom+0.0015,1.3)':d=${Math.round(dur * 30)}:s=${w}x${h}:fps=30`;
@@ -486,9 +493,13 @@ export async function renderVideo(projectId: string, edl: {
     filterParts.push(`[${i}:v]${vf}[v${i}]`);
   });
   const concat = clips.map((_, i) => `[v${i}]`).join("") + `concat=n=${clips.length}:v=1:a=0[vout]`;
-  const existingAudio = audioFiles.filter((a) => { try { return Boolean(a) && existsSync(localMediaPath(a)); } catch { return false; } });
+  const audioFilesResolved = await Promise.all(audioFiles.map(async (audio) => {
+    if (!audio) return { path: "", cleanup: () => undefined };
+    try { return await materializeMediaPath(audio); } catch { return { path: "", cleanup: () => undefined }; }
+  }));
+  const existingAudio = audioFilesResolved.filter((audio) => Boolean(audio.path));
   const audioInputArgs: string[] = [];
-  existingAudio.forEach((a) => { audioInputArgs.push("-i", localMediaPath(a)); });
+  existingAudio.forEach((a) => { audioInputArgs.push("-i", a.path); });
   const audioFilter = existingAudio.length > 1
     ? `${existingAudio.map((_, i) => `[${clips.length + i}:a]aresample=44100[a${i}]`).join(";")};${existingAudio.map((_, i) => `[a${i}]`).join("")}concat=n=${existingAudio.length}:v=0:a=1[aout]`
     : "";
@@ -505,16 +516,19 @@ export async function renderVideo(projectId: string, edl: {
   try {
     execFileSync("ffmpeg", args, { timeout: 1000 * 60 * 10, stdio: ["ignore", "pipe", "pipe"] });
   } catch (e) {
+    assetFiles.forEach((file) => file.cleanup()); audioFilesResolved.forEach((file) => file.cleanup());
     const msg = e instanceof Error ? e.message.slice(0, 800) : String(e).slice(0, 800);
     await jobLog(`FFmpeg failed: ${msg}`);
     return { outputPath: "", previewPath: publicUrl(previewAbs), log: `ffmpeg-error: ${msg}`, durationSec: totalDur, fileSize: 0, renderer: "html-preview" };
   }
   const size = existsSync(outAbs) ? statSync(outAbs).size : 0;
   if (!size || !validMp4(outAbs, true)) {
+    assetFiles.forEach((file) => file.cleanup()); audioFilesResolved.forEach((file) => file.cleanup());
     if (existsSync(outAbs)) unlinkSync(outAbs);
     await jobLog("FFmpeg output failed ffprobe validation — HTML preview retained; MP4 rejected.");
     return { outputPath: "", previewPath: publicUrl(previewAbs), log: "ffprobe-invalid", durationSec: totalDur, fileSize: 0, renderer: "html-preview" };
   }
+  assetFiles.forEach((file) => file.cleanup()); audioFilesResolved.forEach((file) => file.cleanup());
   await jobLog(`Render complete: ${(size / 1024 / 1024).toFixed(2)} MB`);
   return { outputPath: publicUrl(outAbs), previewPath: publicUrl(previewAbs), log: "ffmpeg-ok", durationSec: totalDur, fileSize: size, renderer: "ffmpeg" };
 }
@@ -752,7 +766,7 @@ export const jobHandlers: Record<string, JobHandler> = {
       const prompt = `${proj.title} — ${String(plan.subject ?? scene?.visual ?? "scene")} (${String(plan.archetype ?? "explainer")}); composition: ${String(plan.composition ?? "clear focal subject")}; renderer primitives: ${JSON.stringify(plan.rendererHints ?? {})}`;
       const { svg, costUsd } = await img.generateImage(prompt, { width: 1280, height: 720 });
       const name = `img/${projectId}-${i}.svg`;
-      const stored = putLocalMedia(name, svg);
+      const stored = await getMediaStorage().put(name, svg);
       await db.insert(s.assets).values({ projectId, kind: "image", fileName: `${projectId}-${i}.svg`, storagePath: stored.publicPath, source: img.name, license: "original", attribution: "AI Studio (original render)", rights: "owned", width: 1280, height: 720, meta: { sceneIndex: i, visualPlan: plan, storage: stored } });
       if (costUsd > 0) await recordCost(projectId, jobId, "image", costUsd, `scene ${i}`);
       paths.push(publicUrl(join(GEN_DIR, name)));
@@ -784,10 +798,10 @@ export const jobHandlers: Record<string, JobHandler> = {
       if (!text.trim()) continue;
       const { audioBase64, durationSec, costUsd } = await voice.synthesize(text, { voice: "narrator", speed: 1 });
       const name = `audio/${projectId}-scene${i}.wav`;
-      const stored = putLocalMedia(name, Buffer.from(audioBase64, "base64"));
+      const stored = await getMediaStorage().put(name, Buffer.from(audioBase64, "base64"));
       await db.insert(s.voices).values({ projectId, scriptId: proj.scriptId, provider: voice.name, voiceName: "narrator", text: text.slice(0, 2000), audioPath: stored.publicPath, durationSec, status: "done" });
       if (costUsd > 0) await recordCost(projectId, jobId, "voice", costUsd, `scene ${i}`);
-      files.push(publicUrl(join(GEN_DIR, name)));
+      files.push(stored.publicPath);
     }
     await prog(100);
     return { clips: files.length, files, provider: voice.name };
@@ -804,7 +818,12 @@ export const jobHandlers: Record<string, JobHandler> = {
     const rrows = await db.insert(s.renders).values({ projectId, status: "rendering", progress: 5 }).returning({ id: s.renders.id });
     const renderId = rrows[0].id;
     try {
-      const result = await renderVideo(projectId, erows[0].edl as unknown as { resolution: string; aspectRatio: string; clips: { start: number; end: number; caption: string; textOverlay: string }[]; captions?: { enabled: boolean } }, vrows.map((v) => v.audioPath ?? ""), async (m) => { await log(m); });
+      let result = await renderVideo(projectId, erows[0].edl as unknown as { resolution: string; aspectRatio: string; clips: { start: number; end: number; caption: string; textOverlay: string }[]; captions?: { enabled: boolean } }, vrows.map((v) => v.audioPath ?? ""), async (m) => { await log(m); });
+      const media = getMediaStorage();
+      if (result.outputPath && media.durable) {
+        const stored = await media.put(`video/${projectId}-${Date.now()}.mp4`, readFileSync(localMediaPath(result.outputPath)));
+        result = { ...result, outputPath: stored.publicPath, fileSize: stored.size };
+      }
       await db.update(s.renders).set({ status: result.outputPath ? "done" : "preview", progress: 100, outputPath: result.outputPath, previewHtml: result.previewPath, log: result.log, durationSec: result.durationSec, fileSize: result.fileSize, renderer: result.renderer }).where(eq(s.renders.id, renderId));
       await recordCost(projectId, jobId, "rendering", (result.durationSec / 60) * 0.05, result.renderer);
       await prog(100);
@@ -987,16 +1006,20 @@ export async function runQuality(projectId: string, log?: (m: string) => Promise
   const trows = await db.select().from(s.titleOptions).where(eq(s.titleOptions.projectId, projectId)).orderBy(desc(s.titleOptions.totalScore)).limit(1);
   const throwss = await db.select().from(s.thumbnails).where(eq(s.thumbnails.projectId, projectId)).limit(1);
   const mrows = await db.select().from(s.seoMetadata).where(eq(s.seoMetadata.projectId, projectId)).limit(1);
-  const renderPath = rrows[0]?.outputPath ? (() => { try { return localMediaPath(rrows[0].outputPath); } catch { return ""; } })() : "";
-  const hasRender = Boolean(rrows[0]?.status === "done" && renderPath && (rrows[0]?.fileSize ?? 0) > 0 && validMp4(renderPath, true));
-  const hasAudio = vrows.some((voice) => {
-    const path = voice.audioPath ? (() => { try { return localMediaPath(voice.audioPath); } catch { return ""; } })() : "";
-    return Boolean(path && existsSync(path) && statSync(path).size > 44 && voice.text?.trim());
-  });
-  const hasAssets = arows.every((asset) => {
-    const path = asset.storagePath ? (() => { try { return localMediaPath(asset.storagePath); } catch { return ""; } })() : "";
-    return Boolean(path && existsSync(path) && statSync(path).size > 0);
-  });
+  let hasRender = false;
+  if (rrows[0]?.status === "done" && rrows[0].outputPath && (rrows[0].fileSize ?? 0) > 0) {
+    const renderFile = await materializeMediaPath(rrows[0].outputPath);
+    hasRender = validMp4(renderFile.path, true);
+    renderFile.cleanup();
+  }
+  const hasAudio = (await Promise.all(vrows.map(async (voice) => {
+    if (!voice.audioPath || !voice.text?.trim()) return false;
+    try { const file = await materializeMediaPath(voice.audioPath); const valid = statSync(file.path).size > 44; file.cleanup(); return valid; } catch { return false; }
+  }))).some(Boolean);
+  const hasAssets = (await Promise.all(arows.map(async (asset) => {
+    if (!asset.storagePath) return false;
+    try { const file = await materializeMediaPath(asset.storagePath); const valid = statSync(file.path).size > 0; file.cleanup(); return valid; } catch { return false; }
+  }))).every(Boolean);
   const hasNarration = Boolean(scriptBody.trim()) && (await projectScenes(projectId)).every((scene) => Boolean(scene.narration?.trim()));
   const gate = E.runQualityGate({
     facts: facts.map((f) => ({ status: f.status ?? "UNCERTAIN", isCritical: f.isCritical ?? false })),
@@ -1224,7 +1247,7 @@ export async function generatePackaging(projectId: string, topic: string, seedTi
   for (let i = 0; i < concepts.length; i++) {
     const { svg, costUsd } = await img.generateImage(concepts[i], { width: 1280, height: 720 });
     const name = `thumb/${projectId}-${i}.svg`;
-    const stored = putLocalMedia(name, svg);
+    const stored = await getMediaStorage().put(name, svg);
     const text = (best[0]?.title ?? topic).split(" ").slice(0, 4).join(" ");
     const sc = E.scoreThumbnail({ concept: concepts[i], text, niche });
     await db.insert(s.thumbnails).values({ projectId, concept: concepts[i], imagePath: stored.publicPath, svg: svg.slice(0, 20000), ...sc, selected: i === 0 });

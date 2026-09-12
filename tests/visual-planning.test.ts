@@ -44,3 +44,34 @@ test("storage keys reject traversal and rate limits return a bounded denial", as
   assert.equal(rateLimit("test-key", "test", { limit: 1, windowMs: 60_000 }).allowed, true);
   assert.equal(rateLimit("test-key", "test", { limit: 1, windowMs: 60_000 }).allowed, false);
 });
+
+test("private S3 adapter supports mocked put, get, head, delete, and missing objects", async () => {
+  const { S3StorageAdapter, safeMediaKey, storageStatus } = await import("../src/lib/storage");
+  const objects = new Map<string, { body: Buffer; metadata: Record<string, string>; contentType: string }>();
+  const client = { send: async (command: { input: Record<string, string>; constructor: { name: string } }) => {
+    const key = `${command.input.Bucket}/${command.input.Key}`;
+    if (command.constructor.name === "PutObjectCommand") { objects.set(key, { body: Buffer.from(command.input.Body as string), metadata: command.input.Metadata as unknown as Record<string, string>, contentType: command.input.ContentType }); return {}; }
+    if (command.constructor.name === "GetObjectCommand") { const value = objects.get(key); if (!value) throw new Error("NoSuchKey"); return { Body: { transformToByteArray: async () => value.body } }; }
+    if (command.constructor.name === "HeadObjectCommand") { const value = objects.get(key); if (!value) throw new Error("NotFound"); return { ContentLength: value.body.length, ContentType: value.contentType, Metadata: value.metadata }; }
+    if (command.constructor.name === "DeleteObjectCommand") { objects.delete(key); return {}; }
+    throw new Error("Unexpected command");
+  } } as never;
+  const adapter = new S3StorageAdapter({ endpoint: "https://s3.us-west-002.backblazeb2.com", region: "us-west-002", bucket: "private-test", accessKeyId: "test", secretAccessKey: "test" }, client);
+  const stored = await adapter.put("project-1/test.txt", Buffer.from("hello"));
+  assert.equal(stored.provider, "s3");
+  assert.equal((await adapter.read("project-1/test.txt")).toString(), "hello");
+  assert.equal((await adapter.head("project-1/test.txt")).size, 5);
+  await adapter.delete("project-1/test.txt");
+  await assert.rejects(() => adapter.read("project-1/test.txt"));
+  assert.throws(() => safeMediaKey("project-1/../other.txt"));
+  assert.equal(storageStatus().durable, false);
+});
+
+test("S3 provider reports unavailable without credentials and never falls back silently", async () => {
+  const previous = process.env.MEDIA_STORAGE_PROVIDER;
+  process.env.MEDIA_STORAGE_PROVIDER = "s3";
+  const { getMediaStorage, storageStatus } = await import("../src/lib/storage");
+  assert.equal(storageStatus().status, "not_configured");
+  await assert.rejects(() => getMediaStorage().put("test.txt", Buffer.from("x")), /not configured/);
+  if (previous === undefined) delete process.env.MEDIA_STORAGE_PROVIDER; else process.env.MEDIA_STORAGE_PROVIDER = previous;
+});

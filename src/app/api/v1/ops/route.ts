@@ -7,6 +7,7 @@ import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, userCa
 import { providerOverview } from "@/lib/providers";
 import { buildAutopsy } from "@/lib/engines";
 import { rateLimit, rateLimitResponse } from "@/lib/rate-limit";
+import { storageDevelopmentTest, storageHealth } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,6 +34,7 @@ export async function GET(req: Request) {
     const user = await getSessionUser(req);
     if (!user) return json({ error: "Unauthorized" }, 401);
     if (action === "quota") return json({ quota: await getQuota("youtube") });
+    if (action === "storage-health") return json(await storageHealth());
 
     if (action === "dashboard") {
       // id = channelId (optional); aggregate across user channels otherwise
@@ -113,6 +115,10 @@ export async function POST(req: Request) {
       if (process.env.NODE_ENV === "production") return json({ error: "Failure drill is disabled in production" }, 403);
       const result = await runFailureDrill();
       return json({ drills: result });
+    }
+    if (action === "storage-test") {
+      if (process.env.NODE_ENV === "production") return json({ error: "Storage test is disabled in production" }, 403);
+      return json(await storageDevelopmentTest());
     }
     if (action === "retry-job") {
       const gate = rateLimit(user.id, "retry-job", { limit: 10, windowMs: 60_000 });

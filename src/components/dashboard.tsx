@@ -6,6 +6,7 @@ type AnyRec = Record<string, unknown>;
 const str = (v: unknown, d = ""): string => (typeof v === "string" ? v : d);
 const num = (v: unknown, d = 0): number => (typeof v === "number" ? v : d);
 const arr = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
+const mediaUrl = (v: string): string => v.startsWith("s3://") ? `/api/v1/production?action=media&key=${encodeURIComponent(v)}` : v;
 
 async function api(path: string, opts?: { method?: string; body?: unknown }) {
   const res = await fetch(path, {
@@ -538,10 +539,10 @@ function ProjectView({ data, say, runBusy, busy, reload }: TabProps & { data: An
           <div className="mt-3 text-sm bg-slate-800 rounded-lg p-3">
             <b>Latest render:</b> {str(latest.status)} via {str(latest.renderer)} · {num(latest.durationSec).toFixed(1)}s · {(num(latest.fileSize) / 1024 / 1024).toFixed(2)} MB
             <div className="flex gap-3 mt-1">
-              {str(latest.outputPath) && <a className="text-blue-400 underline" href={str(latest.outputPath)} target="_blank" rel="noreferrer">⬇ MP4</a>}
+              {str(latest.outputPath) && <a className="text-blue-400 underline" href={mediaUrl(str(latest.outputPath))} target="_blank" rel="noreferrer">⬇ MP4</a>}
               {str(latest.previewHtml) && <a className="text-blue-400 underline" href={str(latest.previewHtml)} target="_blank" rel="noreferrer">▶ Timed preview</a>}
             </div>
-            {str(latest.outputPath).endsWith(".mp4") && <video className="mt-2 w-full max-w-lg rounded-lg" controls src={str(latest.outputPath)} />}
+            {str(latest.outputPath).endsWith(".mp4") && <video className="mt-2 w-full max-w-lg rounded-lg" controls src={mediaUrl(str(latest.outputPath))} />}
           </div>
         )}
       </Card>
@@ -557,7 +558,7 @@ function ProjectView({ data, say, runBusy, busy, reload }: TabProps & { data: An
         <Card title={`🖼 Assets (${arr(data.assets).length})`}>
           {arr<AnyRec>(data.assets).map((a) => (
             <div key={str(a.id)} className="text-xs py-1 border-b border-slate-800">
-              {str(a.kind)} · {str(a.fileName)} · {str(a.license)} · {str(a.rights)} {str(a.storagePath) && <a className="text-blue-400 underline ml-1" href={str(a.storagePath)} target="_blank" rel="noreferrer">open</a>}
+              {str(a.kind)} · {str(a.fileName)} · {str(a.license)} · {str(a.rights)} {str(a.storagePath) && <a className="text-blue-400 underline ml-1" href={mediaUrl(str(a.storagePath))} target="_blank" rel="noreferrer">open</a>}
             </div>
           ))}
           <div className="mt-2 text-xs space-y-1">
@@ -578,7 +579,7 @@ function ProjectView({ data, say, runBusy, busy, reload }: TabProps & { data: An
           {arr<AnyRec>(data.voiceClips).map((v) => (
             <div key={str(v.id)} className="text-xs py-1 border-b border-slate-800">
               {str(v.provider)} · {str(v.voiceName)} · {num(v.durationSec).toFixed(1)}s · {str(v.status)}
-              {str(v.audioPath) && <audio className="w-full mt-1" controls src={str(v.audioPath)} />}
+              {str(v.audioPath) && <audio className="w-full mt-1" controls src={mediaUrl(str(v.audioPath))} />}
             </div>
           ))}
           {arr(data.voiceClips).length === 0 && <p className="text-xs text-slate-400">No voice clips yet.</p>}
@@ -640,7 +641,7 @@ function PackagingTab({ nicheId, say, runBusy, busy }: TabProps & { nicheId: str
             <div className="grid md:grid-cols-3 gap-3">
               {arr<AnyRec>(sel.thumbs).map((t) => (
                 <button key={str(t.id)} onClick={() => runBusy("Selecting…", async () => { await api("/api/v1/production?action=select-thumbnail", { body: { projectId: (sel.project as AnyRec)?.id, thumbId: t.id } }); await open(str((sel.project as AnyRec)?.id)); })} className={`text-left bg-slate-800 rounded-lg p-2 ${t.selected ? "ring-2 ring-green-500" : ""}`}>
-                  {str(t.imagePath) && <Image src={str(t.imagePath)} alt="thumb" width={640} height={360} className="rounded-lg w-full" />}
+                  {str(t.imagePath) && <Image src={mediaUrl(str(t.imagePath))} alt="thumb" width={640} height={360} className="rounded-lg w-full" />}
                   <p className="text-xs mt-1">{str(t.concept)} — <Score v={num(t.totalScore)} /></p>
                 </button>
               ))}

@@ -35,7 +35,7 @@
 - YouTube OAuth: `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REDIRECT_URI`.
 - App routing: `PORT`, `NEXT_PUBLIC_APP_URL`.
 - Optional protection: `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW_MS` configure the in-process development fallback.
-- Optional media capability markers: `MEDIA_STORAGE_ENDPOINT`, `MEDIA_STORAGE_TOKEN`, and `WORKER_MODE` are recognized but do not enable an adapter by themselves.
+- Media storage: set `MEDIA_STORAGE_PROVIDER=local` for local development, or `MEDIA_STORAGE_PROVIDER=s3` with `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY` for a private Backblaze B2 S3-compatible bucket. The endpoint must be `https://s3.<region>.backblazeb2.com`; do not guess the region.
 - Keep all credentials in the deployment platform secret store. Never commit `.env` or credential-bearing URLs.
 
 ## Database and migrations
