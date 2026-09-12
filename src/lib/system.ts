@@ -9,7 +9,7 @@ import * as s from "@/db/schema";
 import { eq, desc, and, sql, gte } from "drizzle-orm";
 import { getVoice, getImage, WebResearch } from "./providers";
 import * as E from "./engines";
-import { getMediaStorage, listLocalMedia, localMediaPath, materializeMediaPath } from "./storage";
+import { getMediaStorage, localMediaPath, materializeMediaPath } from "./storage";
 
 // ─── Paths ───
 export const GEN_DIR = join(process.cwd(), "public", "gen");
@@ -822,6 +822,7 @@ export const jobHandlers: Record<string, JobHandler> = {
       const media = getMediaStorage();
       if (result.outputPath && media.durable) {
         const stored = await media.put(`video/${projectId}-${Date.now()}.mp4`, readFileSync(localMediaPath(result.outputPath)));
+        try { unlinkSync(localMediaPath(result.outputPath)); } catch { /* best effort cleanup */ }
         result = { ...result, outputPath: stored.publicPath, fileSize: stored.size };
       }
       await db.update(s.renders).set({ status: result.outputPath ? "done" : "preview", progress: 100, outputPath: result.outputPath, previewHtml: result.previewPath, log: result.log, durationSec: result.durationSec, fileSize: result.fileSize, renderer: result.renderer }).where(eq(s.renders.id, renderId));
@@ -1431,8 +1432,8 @@ export async function runFailureDrill(): Promise<{ name: string; handled: boolea
 // Re-export for API routes
 export { E };
 export function sha1(s: string): string { return createHash("sha1").update(s).digest("hex"); }
-export function listGenFiles(): string[] {
-  try { ensureDirs(); return listLocalMedia(); } catch { return []; }
+export async function listGenFiles(): Promise<string[]> {
+  try { ensureDirs(); return (await getMediaStorage().list()).slice(-100); } catch { return []; }
 }
 export async function channelHealth(channelId: string) {
   const snaps = await db.select().from(s.analyticsSnapshots).where(eq(s.analyticsSnapshots.channelId, channelId)).orderBy(desc(s.analyticsSnapshots.capturedAt)).limit(20);

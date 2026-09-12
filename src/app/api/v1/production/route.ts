@@ -128,7 +128,7 @@ export async function GET(req: Request) {
       const assets = await db.select({ storagePath: s.assets.storagePath }).from(s.assets).where(or(inArray(s.assets.nicheId, nicheIds), ...(projectIds.length ? [inArray(s.assets.projectId, projectIds)] : [])));
       const ownedPaths = new Set(assets.map((asset) => asset.storagePath).filter(Boolean));
       const ownedIds = [...nicheIds, ...projectIds];
-      const files = listGenFiles().filter((file) => ownedPaths.has(file) || ownedIds.some((ownedId) => file.includes(ownedId)));
+      const files = (await listGenFiles()).filter((file) => ownedPaths.has(file) || ownedIds.some((ownedId) => file.includes(ownedId)));
       return json({ files });
     }
     if (action === "media") {

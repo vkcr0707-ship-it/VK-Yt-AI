@@ -24,6 +24,7 @@ export interface MediaStorageAdapter {
   read(key: string): Promise<Buffer>;
   delete(key: string): Promise<void>;
   head(key: string): Promise<{ key: string; size: number; mimeType: string; checksum: string }>;
+  list(prefix?: string): Promise<string[]>;
 }
 
 class LocalStorageAdapter implements MediaStorageAdapter {
@@ -33,6 +34,7 @@ class LocalStorageAdapter implements MediaStorageAdapter {
   async read(key: string): Promise<Buffer> { return readLocalMedia(key); }
   async delete(key: string): Promise<void> { deleteLocalMedia(key); }
   async head(key: string) { const safeKey = safeMediaKey(key); const data = readLocalMedia(safeKey); return { key: safeKey, size: data.length, mimeType: mediaMimeType(safeKey), checksum: createHash("sha256").update(data).digest("hex") }; }
+  async list(prefix = "") { return listLocalMedia().filter((path) => path.includes(prefix)); }
 }
 
 type S3Config = { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string };
@@ -79,6 +81,10 @@ export class S3StorageAdapter implements MediaStorageAdapter {
     const result = await this.client.send(new HeadObjectCommand({ Bucket: this.config.bucket, Key: safeKey }));
     return { key: safeKey, size: result.ContentLength ?? 0, mimeType: result.ContentType ?? mediaMimeType(safeKey), checksum: result.Metadata?.sha256 ?? result.ETag?.replaceAll('"', "") ?? "" };
   }
+  async list(prefix = "") {
+    const listed = await this.client.send(new ListObjectsV2Command({ Bucket: this.config.bucket, Prefix: prefix ? safeMediaKey(prefix) : undefined, MaxKeys: 100 }));
+    return (listed.Contents ?? []).map((item) => `s3://${this.config.bucket}/${item.Key}`).filter(Boolean) as string[];
+  }
 }
 
 class UnavailableStorageAdapter implements MediaStorageAdapter {
@@ -88,6 +94,7 @@ class UnavailableStorageAdapter implements MediaStorageAdapter {
   async read(): Promise<Buffer> { throw new Error("S3 storage is not configured"); }
   async delete(): Promise<void> { throw new Error("S3 storage is not configured"); }
   async head(): Promise<{ key: string; size: number; mimeType: string; checksum: string }> { throw new Error("S3 storage is not configured"); }
+  async list(): Promise<string[]> { throw new Error("S3 storage is not configured"); }
 }
 
 const localRoot = resolve(process.cwd(), "public", "gen");
