@@ -1,6 +1,7 @@
 // Content API: auth, setup wizard, niche intelligence, research, trends,
 // opportunities, ideas, scripts, facts, storyboard, calendar, strategy, memory.
 import { db, formatDatabaseError } from "@/db";
+import { randomUUID } from "node:crypto";
 import * as s from "@/db/schema";
 import { eq, desc, and } from "drizzle-orm";
 import { z } from "zod";
@@ -117,7 +118,7 @@ export async function POST(req: Request) {
       const existing = await db.select().from(s.users).where(eq(s.users.email, p.data.email)).limit(1);
       if (existing[0]) return json({ error: "Email already registered" }, 409);
       const rows = await db.insert(s.users).values({ email: p.data.email, passwordHash: hashPassword(p.data.password), name: p.data.name }).returning({ id: s.users.id, email: s.users.email, name: s.users.name });
-      const token = crypto.randomUUID() + crypto.randomUUID();
+      const token = randomUUID() + randomUUID();
       await db.insert(s.sessions).values({ userId: rows[0].id, token, expiresAt: new Date(Date.now() + 30 * 86400000) });
       const res = Response.json({ user: rows[0] });
       res.headers.set("Set-Cookie", `ayt_session=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000`);
@@ -131,7 +132,7 @@ export async function POST(req: Request) {
       try {
         const rows = await db.select().from(s.users).where(eq(s.users.email, p.data.email)).limit(1);
         if (!rows[0] || !verifyPassword(p.data.password, rows[0].passwordHash)) return json({ error: "Invalid email or password" }, 401);
-        const token = crypto.randomUUID() + crypto.randomUUID();
+        const token = randomUUID() + randomUUID();
         await db.insert(s.sessions).values({ userId: rows[0].id, token, expiresAt: new Date(Date.now() + 30 * 86400000) });
         const res = Response.json({ user: { id: rows[0].id, email: rows[0].email, name: rows[0].name } });
         res.headers.set("Set-Cookie", `ayt_session=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000`);
