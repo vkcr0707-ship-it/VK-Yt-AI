@@ -5,11 +5,11 @@
 - Database: managed PostgreSQL, currently Neon. Drizzle owns the schema in `src/db/schema.ts`.
 - Workers: API-triggered jobs run synchronously by default; the optional rendering worker polls the same PostgreSQL jobs table when enabled.
 - Redis: not used by the current source tree and therefore not required.
-- Rendering: FFmpeg must be installed in the runtime for MP4 output. Without it, the application produces an honest timed HTML preview.
-- Storage: generated assets are written under `public/gen`; use persistent/object storage before scaling beyond a single instance.
-- Storage capability: local filesystem mode is reported as temporary. A durable adapter is intentionally disabled until a compatible object-storage integration is configured; the app never claims local media is durable.
+- Rendering: the persistent worker image includes FFmpeg and ffprobe and is the only production runtime that executes MP4 rendering. Missing capabilities or invalid media fail the render and remain visible in the job log.
+- Storage: production should use the private Backblaze B2 S3-compatible adapter. Objects are materialized into unique temporary worker files, validated, rendered, validated again, and uploaded back to private storage.
+- Storage capability: local filesystem mode is temporary. S3 mode is durable only when all S3 variables are configured and the private bucket is reachable.
 - Scheduling: no external scheduler is currently wired; invoke the autonomous loop through a protected scheduler endpoint or platform cron when enabled.
-- Workers: local jobs run synchronously by default. `Dockerfile.render-worker` provides a polling worker with FFmpeg and ffprobe; set `WORKER_MODE=external` only in that worker runtime. No distributed queue is required.
+- Workers: local jobs run synchronously by default. In production, set `WORKER_MODE=external` in both the web app and the dedicated `Dockerfile.render-worker` service. The web app queues jobs; the worker atomically claims them from the shared PostgreSQL jobs table. No Redis queue is required.
 - Recommended host: an OCI Always Free VM, because it can run Docker Compose on a persistent Linux VPS without changing the application architecture.
 
 ## Local development
@@ -26,7 +26,7 @@
 - Start: `npm run start -- -p 3001`
 - Vercel build: `npm run vercel-build` (build only; does not mutate the database)
 - Hosted Compose: `docker compose up -d --build`
-- Rendering worker: `docker compose build render-worker` then `docker compose up -d render-worker`; the image includes FFmpeg and ffprobe and claims external worker mode only inside the worker container.
+- Rendering worker: `docker compose build render-worker` then `docker compose up -d render-worker`; the image includes FFmpeg and ffprobe. The web and worker containers must share the same production `DATABASE_URL` and private S3 configuration.
 - Health check: `GET /api/health`
 
 ## Environment variables
@@ -36,6 +36,7 @@
 - App routing: `PORT`, `NEXT_PUBLIC_APP_URL`.
 - Optional protection: `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW_MS` configure the in-process development fallback.
 - Media storage: set `MEDIA_STORAGE_PROVIDER=local` for local development, or `MEDIA_STORAGE_PROVIDER=s3` with `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY` for a private Backblaze B2 S3-compatible bucket. The endpoint must be `https://s3.<region>.backblazeb2.com`; do not guess the region.
+- Production worker: `WORKER_MODE=external`, `WORKER_POLL_MS`, and `WORKER_BATCH_SIZE`; the worker also requires `DATABASE_URL` and the same private S3 variables as the web app.
 - Keep all credentials in the deployment platform secret store. Never commit `.env` or credential-bearing URLs.
 
 ## Database and migrations

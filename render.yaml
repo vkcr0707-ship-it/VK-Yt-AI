@@ -12,6 +12,8 @@ services:
         sync: false
       - key: SESSION_SECRET
         generateValue: true
+      - key: WORKER_MODE
+        value: external
       - key: NEXT_PUBLIC_APP_URL
         sync: false
       - key: YOUTUBE_API_KEY
@@ -37,4 +39,45 @@ services:
       - key: TAVILY_API_KEY
         sync: false
       - key: WEB_SEARCH_API_KEY
+        sync: false
+      - key: MEDIA_STORAGE_PROVIDER
+        value: s3
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+
+  - type: worker
+    name: vk-yt-ai-render-worker
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile.render-worker
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: WORKER_MODE
+        value: external
+      - key: WORKER_POLL_MS
+        value: "2000"
+      - key: WORKER_BATCH_SIZE
+        value: "1"
+      - key: MEDIA_STORAGE_PROVIDER
+        value: s3
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
         sync: false
