@@ -26,6 +26,7 @@ function safeRuntimeError(error: unknown): string {
 }
 function diagnosticErrorResponse(message: string, status: number, operation: string, error: unknown): Response {
   const response = json({ error: message }, status);
+  response.headers.set("X-Diagnostic-Version", "192b82a");
   response.headers.set("X-Diagnostic-Operation", operation);
   response.headers.set("X-Diagnostic-Error", safeRuntimeError(error));
   return response;
