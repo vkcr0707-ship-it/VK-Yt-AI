@@ -1,6 +1,6 @@
 // System layer: auth, storage, YouTube Data API + OAuth + upload, FFmpeg renderer,
 // job runner, autonomous pipeline, cost tracking.
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -47,6 +47,59 @@ export async function getSessionUser(req: Request) {
   if (!sess || new Date(sess.expiresAt).getTime() < Date.now()) return null;
   const urows = await db.select().from(s.users).where(eq(s.users.id, sess.userId)).limit(1);
   return urows[0] ?? null;
+}
+
+export async function userOwnsChannel(userId: string, channelId: string): Promise<boolean> {
+  return Boolean((await db.select({ id: s.channels.id }).from(s.channels).where(and(eq(s.channels.id, channelId), eq(s.channels.userId, userId))).limit(1))[0]);
+}
+
+export async function userOwnsNiche(userId: string, nicheId: string): Promise<boolean> {
+  const rows = await db.select({ channelId: s.niches.channelId }).from(s.niches).where(eq(s.niches.id, nicheId)).limit(1);
+  return Boolean(rows[0] && await userOwnsChannel(userId, rows[0].channelId));
+}
+
+export async function userOwnsIdea(userId: string, ideaId: string): Promise<boolean> {
+  const rows = await db.select({ nicheId: s.contentIdeas.nicheId }).from(s.contentIdeas).where(eq(s.contentIdeas.id, ideaId)).limit(1);
+  return Boolean(rows[0] && await userOwnsNiche(userId, rows[0].nicheId));
+}
+
+export async function userOwnsScript(userId: string, scriptId: string): Promise<boolean> {
+  const rows = await db.select({ nicheId: s.scripts.nicheId }).from(s.scripts).where(eq(s.scripts.id, scriptId)).limit(1);
+  return Boolean(rows[0] && await userOwnsNiche(userId, rows[0].nicheId));
+}
+
+export async function userOwnsProject(userId: string, projectId: string): Promise<boolean> {
+  const rows = await db.select({ nicheId: s.videoProjects.nicheId }).from(s.videoProjects).where(eq(s.videoProjects.id, projectId)).limit(1);
+  return Boolean(rows[0] && await userOwnsNiche(userId, rows[0].nicheId));
+}
+
+export async function userOwnsUpload(userId: string, uploadId: string): Promise<boolean> {
+  const rows = await db.select({ projectId: s.uploads.projectId }).from(s.uploads).where(eq(s.uploads.id, uploadId)).limit(1);
+  return Boolean(rows[0] && await userOwnsProject(userId, rows[0].projectId));
+}
+
+function oauthSignature(value: string): string {
+  const secret = process.env.SESSION_SECRET;
+  if (!secret) throw new Error("SESSION_SECRET is required for YouTube OAuth");
+  return createHmac("sha256", secret).update(value).digest("base64url");
+}
+
+export function oauthState(channelId: string, userId: string): string {
+  const payload = `${channelId}.${userId}.${Date.now()}`;
+  return `${Buffer.from(payload).toString("base64url")}.${oauthSignature(payload)}`;
+}
+
+export function verifyOAuthState(state: string): { channelId: string; userId: string } | null {
+  try {
+    const [encoded, signature] = state.split(".");
+    const payload = Buffer.from(encoded, "base64url").toString("utf8");
+    const expected = oauthSignature(payload);
+    const a = Buffer.from(signature ?? ""); const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+    const [channelId, userId, issued] = payload.split(".");
+    if (!channelId || !userId || !issued || Date.now() - Number(issued) > 10 * 60 * 1000) return null;
+    return { channelId, userId };
+  } catch { return null; }
 }
 
 // ─── Quota ───
@@ -142,19 +195,19 @@ export function oauthConfig() {
   return {
     clientId: process.env.YOUTUBE_CLIENT_ID || "",
     clientSecret: process.env.YOUTUBE_CLIENT_SECRET || "",
-    redirectUri: process.env.YOUTUBE_REDIRECT_URI || "http://localhost:3000/api/v1/ops?action=oauth-callback",
+    redirectUri: process.env.YOUTUBE_REDIRECT_URI || "http://localhost:3000/api/v1/production?action=oauth-callback",
   };
 }
 export function oauthConfigured(): boolean {
   const c = oauthConfig();
-  return Boolean(c.clientId && c.clientSecret);
+  return Boolean(c.clientId && c.clientSecret && process.env.SESSION_SECRET);
 }
-export function oauthUrl(channelId: string): string {
+export function oauthUrl(channelId: string, userId: string): string {
   const c = oauthConfig();
   const p = new URLSearchParams({
     client_id: c.clientId, redirect_uri: c.redirectUri, response_type: "code",
     scope: "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/yt-analytics.readonly",
-    access_type: "offline", prompt: "consent", state: channelId,
+    access_type: "offline", prompt: "consent", state: oauthState(channelId, userId),
   });
   return `https://accounts.google.com/o/oauth2/v2/auth?${p.toString()}`;
 }
@@ -166,6 +219,14 @@ export async function exchangeCode(code: string) {
   });
   if (!res.ok) throw new Error(`OAuth exchange failed: ${res.status}`);
   return res.json() as Promise<{ access_token: string; refresh_token?: string; expires_in: number; scope: string }>;
+}
+export async function authenticatedYouTubeChannel(accessToken: string): Promise<{ id: string; title: string; subscribers: number; views: number }> {
+  const res = await fetch(`${YT}/channels?${new URLSearchParams({ part: "snippet,statistics", mine: "true" }).toString()}`, { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(20000) });
+  if (!res.ok) throw new Error(`YouTube channel lookup failed: ${res.status}`);
+  const data = await res.json() as { items?: { id: string; snippet?: { title?: string }; statistics?: { subscriberCount?: string; viewCount?: string } }[] };
+  const channel = data.items?.[0];
+  if (!channel?.id) throw new Error("Authenticated YouTube account has no channel");
+  return { id: channel.id, title: channel.snippet?.title ?? "", subscribers: Number(channel.statistics?.subscriberCount ?? 0), views: Number(channel.statistics?.viewCount ?? 0) };
 }
 export async function refreshAccessToken(channelUuid: string): Promise<string> {
   const rows = await db.select().from(s.youtubeTokens).where(eq(s.youtubeTokens.channelId, channelUuid)).limit(1);
@@ -277,7 +338,7 @@ function escDraw(s: string): string {
 export interface RenderResult { outputPath: string; previewPath: string; log: string; durationSec: number; fileSize: number; renderer: string; }
 
 export async function renderVideo(projectId: string, edl: {
-  resolution: string; aspectRatio: string; clips: { start: number; end: number; caption: string; textOverlay: string; kenburns?: string }[]; captions?: { enabled: boolean };
+  resolution: string; aspectRatio: string; clips: { start: number; end: number; caption: string; textOverlay: string; asset?: string; kenburns?: string }[]; captions?: { enabled: boolean };
 }, audioFiles: string[], jobLog: (m: string) => Promise<void> | void): Promise<RenderResult> {
   ensureDirs();
   const projectRows = await db.select().from(s.videoProjects).where(eq(s.videoProjects.id, projectId)).limit(1);
@@ -304,13 +365,15 @@ export async function renderVideo(projectId: string, edl: {
     return { outputPath: "", previewPath: publicUrl(previewAbs), log: "ffmpeg-missing: preview only", durationSec: totalDur, fileSize: 0, renderer: "html-preview" };
   }
 
-  // Build real MP4: color background per clip + zoompan motion + drawtext captions/overlays + narration mix.
+  // Build real MP4 from scene assets when available, with a color fallback only for missing assets.
   const colors = ["0x0f172a", "0x1e1b4b", "0x052e16", "0x18181b", "0x111827"];
   const filterParts: string[] = [];
   const inputs: string[] = [];
   clips.forEach((c, i) => {
     const dur = Math.max(0.5, c.end - c.start);
-    inputs.push("-f", "lavfi", "-i", `color=c=${colors[i % colors.length]}:s=${w}x${h}:d=${dur}:r=30`);
+    const assetPath = c.asset && !/^https?:\/\//i.test(c.asset) ? join(process.cwd(), "public", c.asset.replace(/^\//, "")) : "";
+    if (assetPath && existsSync(assetPath)) inputs.push("-loop", "1", "-i", assetPath);
+    else inputs.push("-f", "lavfi", "-i", `color=c=${colors[i % colors.length]}:s=${w}x${h}:d=${dur}:r=30`);
     let vf = `zoompan=z='min(zoom+0.0015,1.3)':d=${Math.round(dur * 30)}:s=${w}x${h}:fps=30`;
     const font = fontPath();
     if (font && c.textOverlay) vf += `,drawtext=fontfile=${font}:text='${escDraw(c.textOverlay)}':fontcolor=white:fontsize=${Math.round(h / 12)}:x=(w-text_w)/2:y=h*0.18:shadowcolor=black:shadowx=3:shadowy=3`;
@@ -322,11 +385,14 @@ export async function renderVideo(projectId: string, edl: {
   const existingAudio = audioFiles.filter((a) => a && existsSync(join(process.cwd(), "public", a.replace(/^\//, ""))));
   const audioInputArgs: string[] = [];
   existingAudio.forEach((a) => { audioInputArgs.push("-i", join(process.cwd(), "public", a.replace(/^\//, ""))); });
-  const filterFull = filterParts.length ? `${filterParts.join(";")};${concat}` : "";
+  const audioFilter = existingAudio.length > 1
+    ? `${existingAudio.map((_, i) => `[${clips.length + i}:a]aresample=44100[a${i}]`).join(";")};${existingAudio.map((_, i) => `[a${i}]`).join("")}concat=n=${existingAudio.length}:v=0:a=1[aout]`
+    : "";
+  const filterFull = filterParts.length ? `${filterParts.join(";")};${concat}${audioFilter ? `;${audioFilter}` : ""}` : audioFilter;
   const args: string[] = [...inputs, ...audioInputArgs, "-filter_complex", filterFull || "nullsrc", "-map", "[vout]"];
   if (existingAudio.length > 0) {
-    // Use first narration track, pad/trim to video length, loudnorm + silenceremove
-    args.push("-map", `${clips.length}:a`, "-af", `aresample=44100,silenceremove=start_periods=1:start_duration=0.2:start_threshold=-50dB,loudnorm,apad=whole_dur=${totalDur}`, "-shortest");
+    if (existingAudio.length > 1) args.push("-map", "[aout]", "-af", `silenceremove=start_periods=1:start_duration=0.2:start_threshold=-50dB,loudnorm,apad=whole_dur=${totalDur}`, "-shortest");
+    else args.push("-map", `${clips.length}:a`, "-af", `aresample=44100,silenceremove=start_periods=1:start_duration=0.2:start_threshold=-50dB,loudnorm,apad=whole_dur=${totalDur}`, "-shortest");
   } else {
     args.push("-f", "lavfi", "-i", `anullsrc=r=44100:cl=stereo:d=${totalDur}`, "-map", `${clips.length}:a`, "-shortest");
   }
@@ -531,6 +597,7 @@ export const jobHandlers: Record<string, JobHandler> = {
     await prog(60);
     const wordCount = scriptBody.trim().split(/\s+/).length;
     const srows = await db.insert(s.scripts).values({ ideaId, nicheId: idea.nicheId, title: idea.title, body: scriptBody, wordCount, estimatedDurationSec: gen.estimatedDurationSec, structure: gen.structure as Record<string, unknown>, status: "draft" }).returning({ id: s.scripts.id });
+    await db.update(s.videoProjects).set({ scriptId: srows[0].id, updatedAt: new Date() }).where(eq(s.videoProjects.ideaId, ideaId));
     await db.update(s.contentIdeas).set({ status: "scripted" }).where(eq(s.contentIdeas.id, ideaId));
     await recordCost(null, jobId, "llm", 0.02, "script generation");
     await prog(100);
@@ -571,13 +638,21 @@ export const jobHandlers: Record<string, JobHandler> = {
     const paths: string[] = [];
     for (let i = 0; i < count; i++) {
       await prog(Math.round((i / count) * 90));
-      const prompt = `${proj.title} — scene ${i + 1} cinematic illustration`;
+      const scene = scn[i % Math.max(1, scn.length)] as typeof scn[number] | undefined;
+      const plan = (scene?.visualPlan ?? {}) as Record<string, unknown>;
+      const prompt = `${proj.title} — ${String(plan.subject ?? scene?.visual ?? "scene")} (${String(plan.archetype ?? "explainer")}); composition: ${String(plan.composition ?? "clear focal subject")}; renderer primitives: ${JSON.stringify(plan.rendererHints ?? {})}`;
       const { svg, costUsd } = await img.generateImage(prompt, { width: 1280, height: 720 });
       const name = `img/${projectId}-${i}.svg`;
       writeFileSync(join(GEN_DIR, name), svg);
-      await db.insert(s.assets).values({ projectId, kind: "image", fileName: `${projectId}-${i}.svg`, storagePath: publicUrl(join(GEN_DIR, name)), source: img.name, license: "original", attribution: "AI Studio (original render)", rights: "owned", width: 1280, height: 720 });
+      await db.insert(s.assets).values({ projectId, kind: "image", fileName: `${projectId}-${i}.svg`, storagePath: publicUrl(join(GEN_DIR, name)), source: img.name, license: "original", attribution: "AI Studio (original render)", rights: "owned", width: 1280, height: 720, meta: { sceneIndex: i, visualPlan: plan } });
       if (costUsd > 0) await recordCost(projectId, jobId, "image", costUsd, `scene ${i}`);
       paths.push(publicUrl(join(GEN_DIR, name)));
+    }
+    const erows = await db.select().from(s.editDecisionLists).where(eq(s.editDecisionLists.projectId, projectId)).limit(1);
+    if (erows[0]) {
+      const current = erows[0].edl as { clips?: Record<string, unknown>[] };
+      const clips = (current.clips ?? []).map((clip, i) => ({ ...clip, asset: paths[i % Math.max(1, paths.length)] ?? clip.asset }));
+      await db.update(s.editDecisionLists).set({ edl: { ...current, clips } }).where(eq(s.editDecisionLists.id, erows[0].id));
     }
     await prog(100);
     return { assets: paths.length, paths };
@@ -589,6 +664,7 @@ export const jobHandlers: Record<string, JobHandler> = {
     const proj = prows[0];
     if (!proj) throw new Error("Project not found");
     ensureDirs();
+    await db.delete(s.voices).where(eq(s.voices.projectId, projectId));
     const scenes = await projectScenes(projectId);
     const voice = getVoice();
     const files: string[] = [];
@@ -719,7 +795,7 @@ export async function runJobNow(jobId: string): Promise<void> {
 
 // ─── Project helpers ───
 export async function projectScenes(projectId: string) {
-  const sb = await db.select().from(s.storyboards).where(eq(s.storyboards.projectId, projectId)).limit(1);
+  const sb = await db.select().from(s.storyboards).where(eq(s.storyboards.projectId, projectId)).orderBy(desc(s.storyboards.createdAt)).limit(1);
   if (!sb[0]) return [];
   return db.select().from(s.storyboardScenes).where(eq(s.storyboardScenes.storyboardId, sb[0].id)).orderBy(s.storyboardScenes.sceneIndex);
 }
@@ -746,11 +822,11 @@ export async function buildStoryboardAndEDL(projectId: string, scriptId: string)
   if (!script) throw new Error("Script not found");
   const prows = await db.select().from(s.videoProjects).where(eq(s.videoProjects.id, projectId)).limit(1);
   const proj = prows[0];
-  const scenes = E.buildStoryboard(script.body, script.estimatedDurationSec || 480);
+  const scenes = E.buildStoryboard(script.body, script.estimatedDurationSec || 480, proj?.title ?? script.title);
   const timed = E.timeScenes(scenes, script.estimatedDurationSec || 480);
   const sbrows = await db.insert(s.storyboards).values({ scriptId, projectId, totalDurationSec: Math.round(timed.length ? timed[timed.length - 1].endSec : 0) }).returning({ id: s.storyboards.id });
   for (const t of timed) {
-    await db.insert(s.storyboardScenes).values({ storyboardId: sbrows[0].id, ...t });
+    await db.insert(s.storyboardScenes).values({ storyboardId: sbrows[0].id, ...t, visualPlan: t.visualPlan as unknown as Record<string, unknown> });
   }
   const arows = await db.select().from(s.assets).where(eq(s.assets.projectId, projectId));
   const vrows = await db.select().from(s.voices).where(eq(s.voices.projectId, projectId));
@@ -777,7 +853,8 @@ export async function runQuality(projectId: string, log?: (m: string) => Promise
   const trows = await db.select().from(s.titleOptions).where(eq(s.titleOptions.projectId, projectId)).orderBy(desc(s.titleOptions.totalScore)).limit(1);
   const throwss = await db.select().from(s.thumbnails).where(eq(s.thumbnails.projectId, projectId)).limit(1);
   const mrows = await db.select().from(s.seoMetadata).where(eq(s.seoMetadata.projectId, projectId)).limit(1);
-  const hasRender = Boolean(rrows[0] && (rrows[0].status === "done" || rrows[0].status === "preview"));
+  const renderPath = rrows[0]?.outputPath ? join(process.cwd(), "public", rrows[0].outputPath.replace(/^\//, "")) : "";
+  const hasRender = Boolean(rrows[0]?.status === "done" && renderPath && existsSync(renderPath) && (rrows[0]?.fileSize ?? 0) > 0);
   const gate = E.runQualityGate({
     facts: facts.map((f) => ({ status: f.status ?? "UNCERTAIN", isCritical: f.isCritical ?? false })),
     originalityVerdict: orig.verdict,

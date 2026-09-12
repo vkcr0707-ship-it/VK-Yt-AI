@@ -265,7 +265,7 @@ export function providerOverview() {
   const image = getImage();
   const yt = new YouTubeResearch();
   const web = new WebResearch();
-  const oauth = process.env.YOUTUBE_CLIENT_ID && process.env.YOUTUBE_CLIENT_SECRET ? "ready" : "not_configured";
+  const oauth = process.env.YOUTUBE_CLIENT_ID && process.env.YOUTUBE_CLIENT_SECRET && process.env.SESSION_SECRET ? "ready" : "not_configured";
   return {
     llm: { name: llm.name, status: llm.status(), detail: llm.statusDetail() },
     voice: { name: voice.name, status: voice.status(), detail: voice.statusDetail() },

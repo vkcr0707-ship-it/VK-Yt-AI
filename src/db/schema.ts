@@ -227,6 +227,7 @@ export const storyboardScenes = pgTable("storyboard_scenes", {
   endSec: real("end_sec").default(0),
   narration: text("narration").default(""),
   visual: text("visual").default(""),
+  visualPlan: jsonb("visual_plan").$type<Record<string, unknown>>().default({}),
   broll: text("broll").default(""),
   caption: text("caption").default(""),
   textOverlay: text("text_overlay").default(""),

@@ -353,10 +353,66 @@ export function originalityCheck(scriptBody: string, references: { title: string
   return { verdict, phraseSimilarity, titleSimilarity, structuralSimilarity, conceptSimilarity, maxMatch };
 }
 
-// ─── Storyboard ───
-export interface SceneInput { narration: string; visual: string; caption: string; textOverlay: string }
+// ─── AI visual planning + storyboard ───
+export type VisualArchetype = "explainer" | "process" | "spatial" | "comparison" | "ranking" | "timeline" | "statistics" | "news" | "atmosphere";
 
-export function buildStoryboard(scriptBody: string, totalTargetSec: number): SceneInput[] {
+export interface VisualAssetRequirement {
+  type: "generated-graphic" | "generated-illustration" | "user-provided" | "licensed-stock" | "public-data";
+  description: string;
+  required: boolean;
+  reason: string;
+}
+
+export interface VisualPlan {
+  archetype: VisualArchetype;
+  subject: string;
+  composition: string;
+  motion: string;
+  timing: { enter: string; beats: string[]; exit: string };
+  labels: string[];
+  narrationSync: string;
+  transition: string;
+  assets: VisualAssetRequirement[];
+  rendererHints: { primitives: string[]; camera: string; layout: string };
+}
+
+export interface SceneInput { narration: string; visual: string; caption: string; textOverlay: string; visualPlan: VisualPlan }
+
+const VISUAL_SIGNALS: { archetype: VisualArchetype; terms: string[] }[] = [
+  { archetype: "spatial", terms: ["formation", "map", "location", "position", "offside", "route", "trajectory", "movement", "pitch", "layout", "network", "defender", "player", "goalkeeper", "ball", "line"] },
+  { archetype: "process", terms: ["how", "step", "process", "works", "first", "then", "because", "method", "system", "explain"] },
+  { archetype: "comparison", terms: ["versus", "vs", "compare", "difference", "better", "similar", "between", "against"] },
+  { archetype: "ranking", terms: ["top", "best", "worst", "greatest", "number", "rank", "list", "most", "least"] },
+  { archetype: "timeline", terms: ["history", "timeline", "before", "after", "year", "era", "evolution", "since", "season"] },
+  { archetype: "statistics", terms: ["stat", "data", "percent", "%", "average", "record", "rate", "number", "million", "billion"] },
+  { archetype: "news", terms: ["today", "latest", "news", "report", "transfer", "announced", "breaking", "update", "deal"] },
+];
+
+function planVisual(narration: string, beat: string, topic: string): VisualPlan {
+  const hay = `${topic} ${narration}`.toLowerCase();
+  const match = VISUAL_SIGNALS.map((signal) => ({ signal, score: signal.terms.reduce((n, term) => n + (hay.includes(term) ? 1 : 0), 0) + (signal.archetype === "ranking" && /\b(?:top|number)\s*\d+/.test(hay) ? 3 : 0) }))
+    .sort((a, b) => b.score - a.score)[0];
+  const archetype = match?.score ? match.signal.archetype : beat === "HOOK" ? "atmosphere" : "explainer";
+  const subject = topic.trim() || narration.slice(0, 90);
+  const baseAssets: VisualAssetRequirement[] = [
+    { type: "generated-graphic", description: `${archetype} composition for ${subject}`, required: true, reason: "Core visual is generated from the topic and narration." },
+    { type: "user-provided", description: "Authentic footage, logos, portraits, or match/event media if referenced", required: false, reason: "Only use when the narration calls for real-world material." },
+  ];
+  const plans: Record<VisualArchetype, Omit<VisualPlan, "archetype" | "subject" | "assets">> = {
+    explainer: { composition: "Layered diagram with one focal subject and supporting callouts", motion: "Reveal the focal subject, then animate callouts as each sentence lands", timing: { enter: "fade-and-scale over 0.4s", beats: ["one callout per narration clause"], exit: "clean dissolve" }, labels: ["key idea", "supporting detail"], narrationSync: "Highlight the active phrase and keep earlier labels visible for context", transition: "match-cut on the focal subject", rendererHints: { primitives: ["text", "cards", "lines", "icon"], camera: "subtle push-in", layout: "center-weighted" } },
+    process: { composition: "Numbered horizontal or vertical flow with clear start and end states", motion: "Draw the path progressively and pulse the active step", timing: { enter: "step 1 appears immediately", beats: ["advance on each process verb"], exit: "complete-flow hold for 0.8s" }, labels: ["step", "input", "output"], narrationSync: "Advance the active step at the narration clause that explains it", transition: "wipe following the process direction", rendererHints: { primitives: ["nodes", "arrows", "number badges", "text"], camera: "track along the flow", layout: "directional" } },
+    spatial: { composition: "Top-down or map-like field with named entities and paths", motion: "Move entities along labeled paths and draw trajectories with easing", timing: { enter: "establish the field before narration detail", beats: ["animate each movement or relationship when spoken"], exit: "freeze final state for comprehension" }, labels: ["entity", "direction", "zone", "trajectory"], narrationSync: "Use one moving element per spoken action; keep the final state visible", transition: "camera pan into the next region", rendererHints: { primitives: ["field", "markers", "paths", "zones", "labels"], camera: "top-down tracking", layout: "spatial" } },
+    comparison: { composition: "Two aligned columns sharing the same measurement scale", motion: "Build both sides in parallel, then animate the decisive difference", timing: { enter: "split reveal", beats: ["sync matching attributes", "emphasize the verdict"], exit: "collapse toward the selected insight" }, labels: ["option A", "option B", "metric", "verdict"], narrationSync: "Reveal only the metric being discussed and preserve alignment", transition: "vertical split or shape match", rendererHints: { primitives: ["columns", "bars", "badges", "text"], camera: "locked comparison frame", layout: "balanced split" } },
+    ranking: { composition: "Ordered list with a strong number marker and one highlighted entry", motion: "Items climb into order with staggered timing; spotlight the current rank", timing: { enter: "number marker punch-in", beats: ["one rank per narration beat"], exit: "stack settles into a complete list" }, labels: ["rank", "name", "score", "why it matters"], narrationSync: "Advance the list on each item and reserve the longest hold for the payoff", transition: "numeric snap or card stack", rendererHints: { primitives: ["rank badges", "cards", "bars", "highlight"], camera: "vertical scroll", layout: "ordered stack" } },
+    timeline: { composition: "Chronological rail with eras, dates, and turning points", motion: "Travel along the rail and expand the current milestone", timing: { enter: "rail draws left-to-right", beats: ["jump to each spoken turning point"], exit: "zoom out to show the full arc" }, labels: ["date", "era", "turning point", "outcome"], narrationSync: "Place each milestone exactly at its date phrase", transition: "timeline whip-pan", rendererHints: { primitives: ["rail", "nodes", "date labels", "era bands"], camera: "horizontal travel", layout: "chronological" } },
+    statistics: { composition: "Single large metric supported by a chart and source label", motion: "Count numbers up, draw chart lines, and mark the relevant comparison", timing: { enter: "metric appears before supporting detail", beats: ["animate each data point as cited"], exit: "hold source and final value" }, labels: ["metric", "unit", "period", "source"], narrationSync: "Count or draw only while the number is spoken; pause on the final value", transition: "chart morph", rendererHints: { primitives: ["bars", "line chart", "metric", "source label"], camera: "data-focused push-in", layout: "metric-first" } },
+    news: { composition: "Editorial headline, source strip, and a focused subject image or graphic", motion: "Headline tracks in, source metadata settles, and the subject gets a restrained emphasis", timing: { enter: "headline snap within 0.3s", beats: ["update ticker on new claim"], exit: "source strip remains through transition" }, labels: ["headline", "source", "date", "status"], narrationSync: "Change the headline at the claim boundary and keep source context visible", transition: "editorial slide", rendererHints: { primitives: ["headline", "ticker", "source strip", "subject frame"], camera: "restrained parallax", layout: "editorial" } },
+    atmosphere: { composition: "Cinematic establishing frame with a clear title and one visual focal point", motion: "Slow parallax with a decisive title entrance and subtle ambient movement", timing: { enter: "cold open reveal", beats: ["title hit on the hook"], exit: "directional fade into the next idea" }, labels: ["topic", "hook"], narrationSync: "Keep motion understated under dense narration and hit the title on the hook", transition: "cinematic fade", rendererHints: { primitives: ["title", "focal image", "ambient particles"], camera: "slow push-in", layout: "cinematic" } },
+  };
+  return { archetype, subject, assets: baseAssets, ...plans[archetype] };
+}
+
+export function buildStoryboard(scriptBody: string, totalTargetSec: number, topic = ""): SceneInput[] {
   const beats = scriptBody.split(/\n\n(?=\[[A-Z ]+\])/).filter(Boolean);
   const scenes: SceneInput[] = [];
   beats.forEach((beat) => {
@@ -374,6 +430,7 @@ export function buildStoryboard(scriptBody: string, totalTargetSec: number): Sce
         visual: `${beatName}: ${visualTag}`,
         caption: narration.slice(0, 120),
         textOverlay: beatName === "HOOK" ? "WATCH THIS" : beatName === "REVEAL" ? "THE TRUTH" : "",
+        visualPlan: planVisual(narration, beatName, topic),
       });
     }
   });
@@ -389,7 +446,7 @@ export function timeScenes(scenes: SceneInput[], totalTargetSec: number) {
     const start = cursor; cursor += dur;
     return {
       sceneIndex: i, startSec: +start.toFixed(2), endSec: +cursor.toFixed(2),
-      narration: s.narration, visual: s.visual, broll: `broll:${i % 4}`, caption: s.caption,
+      narration: s.narration, visual: s.visual, visualPlan: s.visualPlan, broll: `broll:${i % 4}`, caption: s.caption,
       textOverlay: s.textOverlay, music: i === 0 ? "intro sting" : "bed:lofi-pulse",
       sfx: s.textOverlay ? "whoosh" : "none", transition: i === 0 ? "cold open" : "cut",
     };
@@ -399,7 +456,7 @@ export function timeScenes(scenes: SceneInput[], totalTargetSec: number) {
 // ─── Edit Decision List + pacing intelligence ───
 export interface TimedScene {
   sceneIndex: number; startSec: number; endSec: number; narration: string; visual: string;
-  caption: string; textOverlay: string; music: string; sfx: string; transition: string;
+  caption: string; textOverlay: string; music: string; sfx: string; transition: string; visualPlan: VisualPlan;
 }
 
 export function buildEDL(scenes: TimedScene[], opts: { aspectRatio: string; resolution: string; audioPath: string; assetPaths: string[] }) {
@@ -410,6 +467,7 @@ export function buildEDL(scenes: TimedScene[], opts: { aspectRatio: string; reso
       asset: opts.assetPaths[i % Math.max(1, opts.assetPaths.length)] ?? `scene-${i}.svg`,
       kenburns: i % 2 === 0 ? "zoom-in" : "pan-right",
       caption: s.caption, textOverlay: s.textOverlay, transition: s.transition,
+      visualPlan: s.visualPlan,
       audio: { narration: `scene-${i}.wav`, music: s.music, sfx: s.sfx },
     };
   });

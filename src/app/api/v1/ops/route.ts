@@ -3,7 +3,7 @@
 import { db } from "@/db";
 import * as s from "@/db/schema";
 import { eq, desc, and, gte, inArray } from "drizzle-orm";
-import { getSessionUser, recentJobs, createJob, runJobNow, channelHealth, getQuota, runE2EPipeline, runFailureDrill, ffmpegAvailable, updateMemoryFromAutopsy, getCreatorIdentity } from "@/lib/system";
+import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, userOwnsIdea, userOwnsScript, recentJobs, createJob, runJobNow, channelHealth, getQuota, runE2EPipeline, runFailureDrill, ffmpegAvailable, updateMemoryFromAutopsy, getCreatorIdentity } from "@/lib/system";
 import { providerOverview } from "@/lib/providers";
 import { buildAutopsy } from "@/lib/engines";
 
@@ -23,12 +23,13 @@ export async function GET(req: Request) {
   const id = url.searchParams.get("id") || "";
   try {
     if (action === "providers") return json({ providers: providerOverview(), ffmpeg: ffmpegAvailable() });
+    const user = await getSessionUser(req);
+    if (!user) return json({ error: "Unauthorized" }, 401);
     if (action === "quota") return json({ quota: await getQuota("youtube") });
 
     if (action === "dashboard") {
       // id = channelId (optional); aggregate across user channels otherwise
-      const user = await getSessionUser(req);
-      const chans = user ? await db.select().from(s.channels).where(eq(s.channels.userId, user.id)) : await db.select().from(s.channels).limit(10);
+      const chans = await db.select().from(s.channels).where(eq(s.channels.userId, user.id));
       const channel = id ? chans.find((c) => c.id === id) ?? chans[0] : chans[0];
       if (!channel) return json({ empty: true });
       const niches = await db.select().from(s.niches).where(eq(s.niches.channelId, channel.id));
@@ -58,20 +59,28 @@ export async function GET(req: Request) {
     if (action === "jobs") return json({ jobs: await recentJobs(50) });
     if (action === "job") {
       const rows = await db.select().from(s.jobs).where(eq(s.jobs.id, id)).limit(1);
+      const payload = (rows[0]?.payload ?? {}) as Record<string, unknown>;
+      if (rows[0] && ((payload.nicheId && !await userOwnsNiche(user.id, String(payload.nicheId))) || (payload.ideaId && !await userOwnsIdea(user.id, String(payload.ideaId))) || (payload.scriptId && !await userOwnsScript(user.id, String(payload.scriptId))) || (payload.projectId && !await userOwnsProject(user.id, String(payload.projectId))))) return json({ error: "Unauthorized" }, 401);
       return json({ job: rows[0] ?? null });
     }
     if (action === "analytics") {
+      if (!await userOwnsChannel(user.id, id)) return json({ error: "Unauthorized" }, 401);
       const snaps = await db.select().from(s.analyticsSnapshots).where(eq(s.analyticsSnapshots.channelId, id)).orderBy(desc(s.analyticsSnapshots.capturedAt)).limit(50);
-      const perfs = await db.select().from(s.videoPerformances).limit(50);
+      const niches = await db.select({ id: s.niches.id }).from(s.niches).where(eq(s.niches.channelId, id));
+      const projects = niches.length ? await db.select({ id: s.videoProjects.id }).from(s.videoProjects).where(inArray(s.videoProjects.nicheId, niches.map((n) => n.id))) : [];
+      const perfs = projects.length ? await db.select().from(s.videoPerformances).where(inArray(s.videoPerformances.projectId, projects.map((p) => p.id))).limit(50) : [];
       return json({ snapshots: snaps, performances: perfs });
     }
     if (action === "project-analytics") {
+      if (!await userOwnsProject(user.id, id)) return json({ error: "Unauthorized" }, 401);
       const snaps = await db.select().from(s.analyticsSnapshots).where(eq(s.analyticsSnapshots.projectId, id)).orderBy(desc(s.analyticsSnapshots.capturedAt)).limit(20);
       const perf = await db.select().from(s.videoPerformances).where(eq(s.videoPerformances.projectId, id)).limit(1);
       return json({ snapshots: snaps, performance: perf[0] ?? null });
     }
     if (action === "costs") {
-      const rows = await db.select().from(s.costRecords).orderBy(desc(s.costRecords.createdAt)).limit(100);
+      const niches = await db.select({ id: s.niches.id }).from(s.niches).innerJoin(s.channels, eq(s.channels.id, s.niches.channelId)).where(eq(s.channels.userId, user.id));
+      const projects = niches.length ? await db.select({ id: s.videoProjects.id }).from(s.videoProjects).where(inArray(s.videoProjects.nicheId, niches.map((n) => n.id))) : [];
+      const rows = projects.length ? await db.select().from(s.costRecords).where(inArray(s.costRecords.projectId, projects.map((p) => p.id))).orderBy(desc(s.costRecords.createdAt)).limit(100) : [];
       const total = rows.reduce((a, r) => a + (r.amountUsd ?? 0), 0);
       return json({ costs: rows, total });
     }
@@ -85,6 +94,8 @@ export async function POST(req: Request) {
   const url = new URL(req.url);
   const action = url.searchParams.get("action") || "";
   try {
+    const user = await getSessionUser(req);
+    if (!user) return json({ error: "Unauthorized" }, 401);
     if (action === "e2e") {
       const logs: string[] = [];
       const result = await runE2EPipeline(async (m) => { logs.push(m); });
@@ -94,13 +105,12 @@ export async function POST(req: Request) {
       const result = await runFailureDrill();
       return json({ drills: result });
     }
-    const user = await getSessionUser(req);
-    if (!user) return json({ error: "Unauthorized" }, 401);
-
     if (action === "retry-job") {
       const b = await body<{ jobId: string }>(req);
       const rows = await db.select().from(s.jobs).where(eq(s.jobs.id, b.jobId)).limit(1);
       if (!rows[0]) return json({ error: "Job not found" }, 404);
+      const payload = (rows[0].payload ?? {}) as Record<string, unknown>;
+      if ((payload.nicheId && !await userOwnsNiche(user.id, String(payload.nicheId))) || (payload.ideaId && !await userOwnsIdea(user.id, String(payload.ideaId))) || (payload.scriptId && !await userOwnsScript(user.id, String(payload.scriptId))) || (payload.projectId && !await userOwnsProject(user.id, String(payload.projectId)))) return json({ error: "Unauthorized" }, 401);
       await db.update(s.jobs).set({ status: "queued", error: "" }).where(eq(s.jobs.id, b.jobId));
       await runJobNow(b.jobId);
       const updated = await db.select().from(s.jobs).where(eq(s.jobs.id, b.jobId)).limit(1);
@@ -108,6 +118,7 @@ export async function POST(req: Request) {
     }
     if (action === "autopsy") {
       const b = await body<{ projectId: string }>(req);
+      if (!await userOwnsProject(user.id, b.projectId)) return json({ error: "Unauthorized" }, 401);
       const prows = await db.select().from(s.videoProjects).where(eq(s.videoProjects.id, b.projectId)).limit(1);
       if (!prows[0]) return json({ error: "Project not found" }, 404);
       const snaps = await db.select().from(s.analyticsSnapshots).where(eq(s.analyticsSnapshots.projectId, b.projectId)).orderBy(desc(s.analyticsSnapshots.capturedAt)).limit(1);
@@ -134,6 +145,7 @@ export async function POST(req: Request) {
       // Deterministic seed of reference videos for demo/testing when no YouTube key exists.
       // Clearly labeled as seed data (source: seed) — never presented as live research.
       const b = await body<{ nicheId: string }>(req);
+      if (!await userOwnsNiche(user.id, b.nicheId)) return json({ error: "Unauthorized" }, 401);
       const nrows = await db.select().from(s.niches).where(eq(s.niches.id, b.nicheId)).limit(1);
       if (!nrows[0]) return json({ error: "Niche not found" }, 404);
       const niche = nrows[0].primaryNiche;

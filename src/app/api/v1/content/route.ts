@@ -4,7 +4,7 @@ import { db } from "@/db";
 import * as s from "@/db/schema";
 import { eq, desc, and } from "drizzle-orm";
 import { z } from "zod";
-import { hashPassword, verifyPassword, getSessionUser, createJob, runJobNow, ensureProjectForIdea, buildStoryboardAndEDL, getMemory } from "@/lib/system";
+import { hashPassword, verifyPassword, getSessionUser, userOwnsChannel, userOwnsNiche, userOwnsIdea, userOwnsScript, userOwnsProject, createJob, runJobNow, ensureProjectForIdea, buildStoryboardAndEDL, getMemory } from "@/lib/system";
 import { buildNicheProfile, planCalendar, buildStrategy } from "@/lib/engines";
 
 export const runtime = "nodejs";
@@ -33,6 +33,12 @@ export async function GET(req: Request) {
       const rows = await db.select().from(s.channels).where(eq(s.channels.userId, u.id)).orderBy(desc(s.channels.createdAt));
       return json({ channels: rows });
     }
+    const user = await getSessionUser(req);
+    if (!user) return json({ error: "Unauthorized" }, 401);
+    if (action === "channel" && !await userOwnsChannel(user.id, id)) return json({ error: "Unauthorized" }, 401);
+    if (["niche", "references", "trends", "opportunities", "ideas", "scripts", "calendar", "strategies"].includes(action) && !await userOwnsNiche(user.id, id)) return json({ error: "Unauthorized" }, 401);
+    if (action === "idea" && !await userOwnsIdea(user.id, id)) return json({ error: "Unauthorized" }, 401);
+    if (action === "script" && !await userOwnsScript(user.id, id)) return json({ error: "Unauthorized" }, 401);
     if (action === "channel") {
       const rows = await db.select().from(s.channels).where(eq(s.channels.id, id)).limit(1);
       if (!rows[0]) return json({ error: "Not found" }, 404);
@@ -109,7 +115,7 @@ export async function POST(req: Request) {
       const token = crypto.randomUUID() + crypto.randomUUID();
       await db.insert(s.sessions).values({ userId: rows[0].id, token, expiresAt: new Date(Date.now() + 30 * 86400000) });
       const res = Response.json({ user: rows[0] });
-      res.headers.set("Set-Cookie", `ayt_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
+      res.headers.set("Set-Cookie", `ayt_session=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000`);
       return res;
     }
     if (action === "login") {
@@ -120,7 +126,7 @@ export async function POST(req: Request) {
       const token = crypto.randomUUID() + crypto.randomUUID();
       await db.insert(s.sessions).values({ userId: rows[0].id, token, expiresAt: new Date(Date.now() + 30 * 86400000) });
       const res = Response.json({ user: { id: rows[0].id, email: rows[0].email, name: rows[0].name } });
-      res.headers.set("Set-Cookie", `ayt_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
+      res.headers.set("Set-Cookie", `ayt_session=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000`);
       return res;
     }
     if (action === "logout") {
@@ -178,6 +184,7 @@ export async function POST(req: Request) {
 
     if (action === "niche-profile-refresh") {
       const b = await body<{ nicheId: string }>(req);
+      if (!await userOwnsNiche(user.id, b.nicheId)) return json({ error: "Unauthorized" }, 401);
       const nrows = await db.select().from(s.niches).where(eq(s.niches.id, b.nicheId)).limit(1);
       if (!nrows[0]) return json({ error: "Niche not found" }, 404);
       const prof = buildNicheProfile(nrows[0].primaryNiche, (nrows[0].subNiches as string[]) ?? [], (nrows[0].topicsToAvoid as string[]) ?? []);
@@ -200,6 +207,7 @@ export async function POST(req: Request) {
         const v = (b as Record<string, unknown>)[k];
         if (v) payload[k] = v;
       }
+      if ((b.nicheId && !await userOwnsNiche(user.id, b.nicheId)) || (b.ideaId && !await userOwnsIdea(user.id, b.ideaId)) || (b.scriptId && !await userOwnsScript(user.id, b.scriptId)) || (b.projectId && !await userOwnsProject(user.id, b.projectId))) return json({ error: "Unauthorized" }, 401);
       const jobId = await createJob(b.type, payload);
       await runJobNow(jobId);
       const rows = await db.select().from(s.jobs).where(eq(s.jobs.id, jobId)).limit(1);
@@ -208,6 +216,7 @@ export async function POST(req: Request) {
 
     if (action === "select-idea") {
       const b = await body<{ ideaId: string }>(req);
+      if (!await userOwnsIdea(user.id, b.ideaId)) return json({ error: "Unauthorized" }, 401);
       await db.update(s.contentIdeas).set({ status: "selected" }).where(eq(s.contentIdeas.id, b.ideaId));
       const projectId = await ensureProjectForIdea(b.ideaId);
       return json({ projectId });
@@ -215,6 +224,7 @@ export async function POST(req: Request) {
 
     if (action === "update-script") {
       const b = await body<{ scriptId: string; body: string; title?: string }>(req);
+      if (!await userOwnsScript(user.id, b.scriptId)) return json({ error: "Unauthorized" }, 401);
       if (!b.scriptId || !b.body) return json({ error: "scriptId and body required" }, 400);
       const words = b.body.split(/\s+/).filter(Boolean).length;
       await db.update(s.scripts).set({ body: b.body, wordCount: words, estimatedDurationSec: Math.round((words / 150) * 60), ...(b.title ? { title: b.title.slice(0, 300) } : {}) }).where(eq(s.scripts.id, b.scriptId));
@@ -225,18 +235,27 @@ export async function POST(req: Request) {
       const b = await body<{ sceneId: string; narration?: string; visual?: string; caption?: string; textOverlay?: string }>(req);
       const patch: Record<string, unknown> = {};
       for (const k of ["narration", "visual", "caption", "textOverlay"] as const) if (b[k] !== undefined) patch[k] = b[k];
+      const scene = (await db.select({ storyboardId: s.storyboardScenes.storyboardId }).from(s.storyboardScenes).where(eq(s.storyboardScenes.id, b.sceneId)).limit(1))[0];
+      const storyboard = scene ? (await db.select({ projectId: s.storyboards.projectId }).from(s.storyboards).where(eq(s.storyboards.id, scene.storyboardId)).limit(1))[0] : null;
+      if (!storyboard?.projectId || !await userOwnsProject(user.id, storyboard.projectId)) return json({ error: "Unauthorized" }, 401);
       await db.update(s.storyboardScenes).set(patch).where(eq(s.storyboardScenes.id, b.sceneId));
       return json({ ok: true });
     }
 
     if (action === "build-storyboard") {
-      const b = await body<{ projectId: string; scriptId: string }>(req);
-      const r = await buildStoryboardAndEDL(b.projectId, b.scriptId);
+      const b = await body<{ projectId: string; scriptId?: string }>(req);
+      if (!await userOwnsProject(user.id, b.projectId)) return json({ error: "Unauthorized" }, 401);
+      const project = (await db.select({ scriptId: s.videoProjects.scriptId, ideaId: s.videoProjects.ideaId }).from(s.videoProjects).where(eq(s.videoProjects.id, b.projectId)).limit(1))[0];
+      const latestScript = !b.scriptId && project?.ideaId ? (await db.select({ id: s.scripts.id }).from(s.scripts).where(eq(s.scripts.ideaId, project.ideaId)).orderBy(desc(s.scripts.createdAt)).limit(1))[0] : null;
+      const scriptId = b.scriptId || project?.scriptId || latestScript?.id;
+      if (!scriptId || !await userOwnsScript(user.id, scriptId)) return json({ error: "Script not found for project" }, 400);
+      const r = await buildStoryboardAndEDL(b.projectId, scriptId);
       return json(r);
     }
 
     if (action === "plan-calendar") {
       const b = await body<{ nicheId: string; weeks?: number }>(req);
+      if (!await userOwnsNiche(user.id, b.nicheId)) return json({ error: "Unauthorized" }, 401);
       const nrows = await db.select().from(s.niches).where(eq(s.niches.id, b.nicheId)).limit(1);
       if (!nrows[0]) return json({ error: "Niche not found" }, 404);
       const opps = await db.select().from(s.opportunities).where(eq(s.opportunities.nicheId, b.nicheId)).orderBy(desc(s.opportunities.opportunityScore)).limit(20);
@@ -251,6 +270,7 @@ export async function POST(req: Request) {
 
     if (action === "strategy") {
       const b = await body<{ nicheId: string }>(req);
+      if (!await userOwnsNiche(user.id, b.nicheId)) return json({ error: "Unauthorized" }, 401);
       const nrows = await db.select().from(s.niches).where(eq(s.niches.id, b.nicheId)).limit(1);
       if (!nrows[0]) return json({ error: "Niche not found" }, 404);
       const topOpp = await db.select().from(s.opportunities).where(eq(s.opportunities.nicheId, b.nicheId)).orderBy(desc(s.opportunities.opportunityScore)).limit(1);
@@ -267,6 +287,7 @@ export async function POST(req: Request) {
 
     if (action === "automation") {
       const b = await body<Record<string, unknown> & { channelId: string }>(req);
+      if (!await userOwnsChannel(user.id, b.channelId)) return json({ error: "Unauthorized" }, 401);
       const patch: Record<string, unknown> = {};
       for (const k of ["mode", "autoResearch", "autoIdeas", "autoScript", "autoProduction", "autoUpload", "autoPublishing", "autoAnalytics", "autoStrategy", "approvalGates", "maxVideosPerDay", "maxVideosPerWeek", "maxCostPerVideo", "creatorName", "brandName", "creatorHandle", "copyrightLine", "aiAttribution", "socialLinks", "includeSpokenAttribution"] as const) {
         if (b[k] !== undefined) patch[k] = b[k];
@@ -278,6 +299,7 @@ export async function POST(req: Request) {
 
     if (action === "add-competitor") {
       const b = await body<{ nicheId: string; channelName: string; channelUrl?: string }>(req);
+      if (!await userOwnsNiche(user.id, b.nicheId)) return json({ error: "Unauthorized" }, 401);
       if (!b.nicheId || !b.channelName) return json({ error: "Missing fields" }, 400);
       await db.insert(s.competitors).values({ nicheId: b.nicheId, channelName: b.channelName.slice(0, 300), channelUrl: (b.channelUrl ?? "").slice(0, 500) });
       return json({ ok: true });
@@ -297,6 +319,8 @@ export async function DELETE(req: Request) {
   if (!user) return json({ error: "Unauthorized" }, 401);
   try {
     if (action === "competitor" && id) {
+      const competitor = (await db.select({ nicheId: s.competitors.nicheId }).from(s.competitors).where(eq(s.competitors.id, id)).limit(1))[0];
+      if (!competitor?.nicheId || !await userOwnsNiche(user.id, competitor.nicheId)) return json({ error: "Unauthorized" }, 401);
       await db.delete(s.competitors).where(eq(s.competitors.id, id));
       return json({ ok: true });
     }

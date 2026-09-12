@@ -107,7 +107,7 @@ export default function Dashboard() {
           {niche && <span className="text-xs bg-red-600/20 text-red-300 px-2 py-1 rounded-full">Niche: {str(niche.primaryNiche)}</span>}
           <div className="ml-auto flex items-center gap-3 text-sm">
             <span className="text-slate-400">{str(user.name)} · {str(user.email)}</span>
-            <button onClick={() => runBusy("logout", async () => { await api("/api/v1/content?action=logout"); setUser(null); })} className="bg-slate-800 px-3 py-1.5 rounded-lg">Log out</button>
+            <button onClick={() => runBusy("logout", async () => { await api("/api/v1/content?action=logout", { method: "POST" }); setUser(null); })} className="bg-slate-800 px-3 py-1.5 rounded-lg">Log out</button>
           </div>
         </div>
         <nav className="max-w-7xl mx-auto px-4 pb-2 flex gap-1.5 flex-wrap">
@@ -591,9 +591,12 @@ function ProjectView({ data, say, runBusy, busy, reload }: TabProps & { data: An
 
 function SceneEditor({ scene, say, runBusy, busy }: TabProps & { scene: AnyRec }) {
   const [f, setF] = useState({ narration: str(scene.narration), visual: str(scene.visual), caption: str(scene.caption), textOverlay: str(scene.textOverlay) });
+  const plan = (scene.visualPlan ?? {}) as AnyRec;
+  const assets = arr<AnyRec>(plan.assets);
   return (
     <div className="bg-slate-800 rounded-lg p-2 text-xs">
       <b>Scene {num(scene.sceneIndex) + 1}</b> <span className="text-slate-400">{num(scene.startSec).toFixed(1)}s → {num(scene.endSec).toFixed(1)}s · {str(scene.transition)} · 🎵 {str(scene.music)} · 🔊 {str(scene.sfx)}</span>
+      {str(plan.archetype) && <div className="mt-1 grid gap-1 md:grid-cols-2 text-slate-300"><span><b className="text-white">AI visual plan:</b> {str(plan.archetype)} · {str(plan.subject)}</span><span><b className="text-white">Motion:</b> {str(plan.motion)}</span><span><b className="text-white">Sync:</b> {str(plan.narrationSync)}</span><span><b className="text-white">Transition:</b> {str(plan.transition)}</span><span><b className="text-white">Labels:</b> {arr(plan.labels).map((label) => str(label)).join(", ")}</span><span><b className="text-white">Assets:</b> {assets.map((a) => `${str(a.type)}: ${str(a.description)}`).join(" · ")}</span></div>}
       <textarea className="w-full bg-slate-900 rounded p-1.5 mt-1" rows={2} value={f.narration} onChange={(e) => setF({ ...f, narration: e.target.value })} />
       <div className="grid grid-cols-3 gap-1 mt-1">
         <input className="bg-slate-900 rounded p-1.5" placeholder="visual" value={f.visual} onChange={(e) => setF({ ...f, visual: e.target.value })} />

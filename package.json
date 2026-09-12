@@ -5,6 +5,7 @@
     "dev": "next dev",
     "build": "drizzle-kit push --config=drizzle.config.ts && next build",
     "start": "next start",
+    "test": "node --import tsx --test tests/**/*.test.ts",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "vercel-build": "npm run build"

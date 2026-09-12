@@ -3,7 +3,7 @@
 import { db } from "@/db";
 import * as s from "@/db/schema";
 import { eq, desc, and } from "drizzle-orm";
-import { getSessionUser, projectScenes, generatePackaging, oauthConfigured, oauthUrl, exchangeCode, runQuality, projectCost, listGenFiles, ensureDirs } from "@/lib/system";
+import { getSessionUser, userOwnsChannel, userOwnsProject, userOwnsNiche, projectScenes, generatePackaging, oauthConfigured, oauthUrl, verifyOAuthState, exchangeCode, authenticatedYouTubeChannel, runQuality, projectCost, listGenFiles, ensureDirs } from "@/lib/system";
 import { writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { GEN_DIR } from "@/lib/system";
@@ -30,13 +30,20 @@ export async function GET(req: Request) {
     if (err) return Response.redirect(new URL("/?tab=publish&oauth=error", req.url));
     if (!code || !state) return Response.redirect(new URL("/?tab=publish&oauth=missing", req.url));
     try {
+      const stateData = verifyOAuthState(state);
+      const sessionUser = await getSessionUser(req);
+      if (!stateData || !sessionUser || stateData.userId !== sessionUser.id || !await userOwnsChannel(sessionUser.id, stateData.channelId)) {
+        return Response.redirect(new URL("/?tab=publish&oauth=invalid-state", req.url));
+      }
       const tok = await exchangeCode(code);
-      const existing = await db.select().from(s.youtubeTokens).where(eq(s.youtubeTokens.channelId, state)).limit(1);
+      const ytChannel = await authenticatedYouTubeChannel(tok.access_token);
+      const existing = await db.select().from(s.youtubeTokens).where(eq(s.youtubeTokens.channelId, stateData.channelId)).limit(1);
       if (existing[0]) {
         await db.update(s.youtubeTokens).set({ accessToken: tok.access_token, ...(tok.refresh_token ? { refreshToken: tok.refresh_token } : {}), expiresAt: new Date(Date.now() + tok.expires_in * 1000), scope: tok.scope }).where(eq(s.youtubeTokens.id, existing[0].id));
       } else {
-        await db.insert(s.youtubeTokens).values({ channelId: state, accessToken: tok.access_token, refreshToken: tok.refresh_token ?? "", expiresAt: new Date(Date.now() + tok.expires_in * 1000), scope: tok.scope });
+        await db.insert(s.youtubeTokens).values({ channelId: stateData.channelId, accessToken: tok.access_token, refreshToken: tok.refresh_token ?? "", expiresAt: new Date(Date.now() + tok.expires_in * 1000), scope: tok.scope });
       }
+      await db.update(s.channels).set({ youtubeChannelId: ytChannel.id, channelUrl: `https://www.youtube.com/channel/${ytChannel.id}` }).where(eq(s.channels.id, stateData.channelId));
       return Response.redirect(new URL("/?tab=publish&oauth=ok", req.url));
     } catch {
       return Response.redirect(new URL("/?tab=publish&oauth=failed", req.url));
@@ -44,10 +51,14 @@ export async function GET(req: Request) {
   }
   try {
     if (action === "projects") {
+      const user = await getSessionUser(req);
+      if (!user || !await userOwnsNiche(user.id, id)) return json({ error: "Unauthorized" }, 401);
       const rows = await db.select().from(s.videoProjects).where(eq(s.videoProjects.nicheId, id)).orderBy(desc(s.videoProjects.createdAt)).limit(50);
       return json({ projects: rows });
     }
     if (action === "project") {
+      const user = await getSessionUser(req);
+      if (!user || !await userOwnsProject(user.id, id)) return json({ error: "Unauthorized" }, 401);
       const rows = await db.select().from(s.videoProjects).where(eq(s.videoProjects.id, id)).limit(1);
       if (!rows[0]) return json({ error: "Not found" }, 404);
       const scenes = await projectScenes(id);
@@ -66,12 +77,16 @@ export async function GET(req: Request) {
       return json({ project: rows[0], scenes, edl: edl[0] ?? null, assets, voiceClips, renders, thumbs, titles, seo: seo[0] ?? null, gates, uploads, costs, script, totalCost });
     }
     if (action === "oauth-status") {
+      const user = await getSessionUser(req);
+      if (!user || !await userOwnsChannel(user.id, id)) return json({ error: "Unauthorized" }, 401);
       const rows = await db.select().from(s.youtubeTokens).where(eq(s.youtubeTokens.channelId, id)).limit(1);
       return json({ configured: oauthConfigured(), connected: Boolean(rows[0]?.refreshToken || rows[0]?.accessToken) });
     }
     if (action === "oauth-url") {
+      const user = await getSessionUser(req);
+      if (!user || !await userOwnsChannel(user.id, id)) return json({ error: "Unauthorized" }, 401);
       if (!oauthConfigured()) return json({ error: "Integration not configured — set YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REDIRECT_URI" }, 400);
-      return json({ url: oauthUrl(id) });
+      return json({ url: oauthUrl(id, user.id) });
     }
     if (action === "files") {
       return json({ files: listGenFiles() });
@@ -91,6 +106,7 @@ export async function POST(req: Request) {
 
     if (action === "packaging") {
       const b = await body<{ projectId: string }>(req);
+      if (!await userOwnsProject(user.id, b.projectId)) return json({ error: "Unauthorized" }, 401);
       const prows = await db.select().from(s.videoProjects).where(eq(s.videoProjects.id, b.projectId)).limit(1);
       if (!prows[0]) return json({ error: "Project not found" }, 404);
       const nrows = await db.select().from(s.niches).where(eq(s.niches.id, prows[0].nicheId)).limit(1);
@@ -99,6 +115,7 @@ export async function POST(req: Request) {
     }
     if (action === "select-title") {
       const b = await body<{ projectId: string; titleId: string }>(req);
+      if (!await userOwnsProject(user.id, b.projectId)) return json({ error: "Unauthorized" }, 401);
       await db.update(s.titleOptions).set({ selected: false }).where(eq(s.titleOptions.projectId, b.projectId));
       await db.update(s.titleOptions).set({ selected: true }).where(eq(s.titleOptions.id, b.titleId));
       const t = await db.select().from(s.titleOptions).where(eq(s.titleOptions.id, b.titleId)).limit(1);
@@ -111,12 +128,14 @@ export async function POST(req: Request) {
     }
     if (action === "select-thumbnail") {
       const b = await body<{ projectId: string; thumbId: string }>(req);
+      if (!await userOwnsProject(user.id, b.projectId)) return json({ error: "Unauthorized" }, 401);
       await db.update(s.thumbnails).set({ selected: false }).where(eq(s.thumbnails.projectId, b.projectId));
       await db.update(s.thumbnails).set({ selected: true }).where(eq(s.thumbnails.id, b.thumbId));
       return json({ ok: true });
     }
     if (action === "update-seo") {
       const b = await body<{ projectId: string; title?: string; description?: string; tags?: string[]; categoryId?: string }>(req);
+      if (!await userOwnsProject(user.id, b.projectId)) return json({ error: "Unauthorized" }, 401);
       const patch: Record<string, unknown> = {};
       if (b.title !== undefined) patch.title = b.title.slice(0, 200);
       if (b.description !== undefined) patch.description = b.description.slice(0, 5000);
@@ -127,6 +146,7 @@ export async function POST(req: Request) {
     }
     if (action === "prepare-upload") {
       const b = await body<{ projectId: string; privacy?: string; scheduledAt?: string; playlistId?: string }>(req);
+      if (!await userOwnsProject(user.id, b.projectId)) return json({ error: "Unauthorized" }, 401);
       const q = await runQuality(b.projectId);
       if (q.verdict !== "PASS") {
         const override = (b as Record<string, unknown>).overrideGates === true;
@@ -144,6 +164,7 @@ export async function POST(req: Request) {
     }
     if (action === "upload-asset") {
       const b = await body<{ projectId?: string; nicheId?: string; fileName: string; dataBase64: string; license?: string; attribution?: string; source?: string }>(req);
+      if ((b.projectId && !await userOwnsProject(user.id, b.projectId)) || (!b.projectId && b.nicheId && !await userOwnsNiche(user.id, b.nicheId))) return json({ error: "Unauthorized" }, 401);
       if (!b.fileName || !b.dataBase64) return json({ error: "fileName and dataBase64 required" }, 400);
       if (b.dataBase64.length > 15_000_000) return json({ error: "File too large (max ~10MB)" }, 400);
       ensureDirs();
@@ -160,6 +181,7 @@ export async function POST(req: Request) {
     }
     if (action === "disconnect-oauth") {
       const b = await body<{ channelId: string }>(req);
+      if (!await userOwnsChannel(user.id, b.channelId)) return json({ error: "Unauthorized" }, 401);
       await db.delete(s.youtubeTokens).where(eq(s.youtubeTokens.channelId, b.channelId));
       return json({ ok: true });
     }

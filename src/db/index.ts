@@ -7,6 +7,10 @@ config();
 
 const databaseUrl = process.env.DATABASE_URL;
 
+if (!databaseUrl && process.env.NODE_ENV === "production") {
+  throw new Error("DATABASE_URL is required in production");
+}
+
 const globalForDb = globalThis as typeof globalThis & {
   __arenaNextJsPostgresqlPool?: Pool;
 };

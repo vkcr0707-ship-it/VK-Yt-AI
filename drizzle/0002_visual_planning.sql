@@ -1,0 +1,1 @@
+ALTER TABLE "storyboard_scenes" ADD COLUMN "visual_plan" jsonb DEFAULT '{}';--> statement-breakpoint
