@@ -902,11 +902,11 @@ export const jobHandlers: Record<string, JobHandler> = {
   },
 };
 
-export async function runJobNow(jobId: string): Promise<void> {
+export async function runJobNow(jobId: string, options: { alreadyClaimed?: boolean } = {}): Promise<void> {
   const rows = await db.select().from(s.jobs).where(eq(s.jobs.id, jobId)).limit(1);
   const job = rows[0];
   if (!job) throw new Error("Job not found");
-  if (job.status === "done" || job.status === "running") return;
+  if (job.status === "done" || (job.status === "running" && !options.alreadyClaimed)) return;
   const handler = jobHandlers[job.type];
   if (!handler) { await updateJob(jobId, { status: "failed", error: `No handler for ${job.type}` }); return; }
   await updateJob(jobId, { status: "running", startedAt: new Date(), error: "" });

@@ -3,13 +3,13 @@
 ## Architecture
 - Frontend and backend: Next.js App Router route handlers deployed as one Node.js service.
 - Database: managed PostgreSQL, currently Neon. Drizzle owns the schema in `src/db/schema.ts`.
-- Workers: no separate queue worker is required by the current implementation; jobs run through API-triggered handlers and the autonomous loop.
+- Workers: API-triggered jobs run synchronously by default; the optional rendering worker polls the same PostgreSQL jobs table when enabled.
 - Redis: not used by the current source tree and therefore not required.
 - Rendering: FFmpeg must be installed in the runtime for MP4 output. Without it, the application produces an honest timed HTML preview.
 - Storage: generated assets are written under `public/gen`; use persistent/object storage before scaling beyond a single instance.
 - Storage capability: local filesystem mode is reported as temporary. A durable adapter is intentionally disabled until a compatible object-storage integration is configured; the app never claims local media is durable.
 - Scheduling: no external scheduler is currently wired; invoke the autonomous loop through a protected scheduler endpoint or platform cron when enabled.
-- Workers: current jobs run in local synchronous mode. `WORKER_MODE=external` reports an unavailable worker adapter rather than pretending a distributed queue exists.
+- Workers: local jobs run synchronously by default. `Dockerfile.render-worker` provides a polling worker with FFmpeg and ffprobe; set `WORKER_MODE=external` only in that worker runtime. No distributed queue is required.
 - Recommended host: an OCI Always Free VM, because it can run Docker Compose on a persistent Linux VPS without changing the application architecture.
 
 ## Local development
@@ -26,6 +26,7 @@
 - Start: `npm run start -- -p 3001`
 - Vercel build: `npm run vercel-build` (build only; does not mutate the database)
 - Hosted Compose: `docker compose up -d --build`
+- Rendering worker: `docker compose build render-worker` then `docker compose up -d render-worker`; the image includes FFmpeg and ffprobe and claims external worker mode only inside the worker container.
 - Health check: `GET /api/health`
 
 ## Environment variables

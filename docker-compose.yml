@@ -18,6 +18,20 @@ services:
     volumes:
       - generated_media:/app/public/gen
 
+  render-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.render-worker
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      WORKER_MODE: external
+      WORKER_POLL_MS: 2000
+    restart: unless-stopped
+    volumes:
+      - generated_media:/app/public/gen
+
   redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes
